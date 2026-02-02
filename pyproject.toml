@@ -1,0 +1,17 @@
+[project]
+name = "deploy-vm"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "cyclopts>=3.0.0",
+    "rich>=13.0.0",
+    "fabric>=3.0.0",
+    "ruff>=0.14.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+deploy-vm = "deploy_vm:app"
