@@ -18,71 +18,6 @@ from .utils import error, log, run_cmd, run_cmd_json, warn
 
 ProviderName = Literal["digitalocean", "aws"]
 
-PROVIDER_OPTIONS = {
-    "digitalocean": {
-        "regions": [
-            "syd1",
-            "sgp1",
-            "nyc1",
-            "nyc3",
-            "sfo3",
-            "lon1",
-            "fra1",
-            "ams3",
-            "tor1",
-            "blr1",
-        ],
-        "vm_sizes": [
-            "s-1vcpu-512mb",
-            "s-1vcpu-1gb",
-            "s-1vcpu-2gb",
-            "s-2vcpu-2gb",
-            "s-2vcpu-4gb",
-            "s-4vcpu-8gb",
-        ],
-        "os_images": ["ubuntu-24-04-x64", "ubuntu-22-04-x64", "ubuntu-20-04-x64"],
-    },
-    "aws": {
-        "regions": [
-            "us-east-1",
-            "us-east-2",
-            "us-west-1",
-            "us-west-2",
-            "ca-central-1",
-            "eu-west-1",
-            "eu-west-2",
-            "eu-west-3",
-            "eu-central-1",
-            "eu-north-1",
-            "ap-southeast-1",
-            "ap-southeast-2",
-            "ap-northeast-1",
-            "ap-northeast-2",
-            "ap-south-1",
-            "sa-east-1",
-        ],
-        "vm_sizes": [
-            "t3.micro",
-            "t3.small",
-            "t3.medium",
-            "t3.large",
-            "t3.xlarge",
-            "t3.2xlarge",
-            "t4g.micro",
-            "t4g.small",
-            "t4g.medium",
-            "t4g.large",
-            "m5.large",
-            "m5.xlarge",
-            "m5.2xlarge",
-        ],
-        "os_images": [
-            "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*",
-            "ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*",
-        ],
-    },
-}
-
 
 def get_local_ssh_key() -> tuple[str, str]:
     """:return: (key_content, md5_fingerprint)"""
@@ -322,6 +257,25 @@ class DigitalOceanProvider:
 
 
 class AWSProvider:
+    REGIONS = [
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+        "ca-central-1",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "eu-central-1",
+        "eu-north-1",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-south-1",
+        "sa-east-1",
+    ]
+
     def __init__(
         self,
         os_image: str | None = None,
@@ -486,19 +440,17 @@ class AWSProvider:
         :param region: AWS region or availability zone
         :return: Normalized region name
         """
-        valid_regions = PROVIDER_OPTIONS["aws"]["regions"]
-
-        if region and region[-1].isalpha() and region[:-1] in valid_regions:
+        if region and region[-1].isalpha() and region[:-1] in self.REGIONS:
             normalized_region = region[:-1]
             log(
                 f"Converted availability zone '{region}' to region '{normalized_region}'"
             )
             return normalized_region
 
-        if region not in valid_regions:
+        if region not in self.REGIONS:
             error(
                 f"Invalid AWS region: '{region}'\n"
-                f"Valid AWS regions: {', '.join(valid_regions[:6])}, ...\n"
+                f"Valid AWS regions: {', '.join(self.REGIONS[:6])}, ...\n"
                 f"See PROVIDER_COMPARISON.md for full list."
             )
 

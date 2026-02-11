@@ -2,7 +2,6 @@
 
 from .cli import app
 from .providers import (
-    PROVIDER_OPTIONS,
     AWSProvider,
     DigitalOceanProvider,
     Provider,
@@ -22,7 +21,6 @@ __all__ = [
     "AWSProvider",
     "DigitalOceanProvider",
     "Provider",
-    "PROVIDER_OPTIONS",
     "get_provider",
     "app",
     "log",
