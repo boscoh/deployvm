@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
@@ -373,11 +374,6 @@ class AWSProvider:
             aws_config["region_name"] = region
 
         try:
-            aws_credentials_path = os.path.expanduser("~/.aws/credentials")
-            if not os.path.exists(aws_credentials_path):
-                log("No AWS credentials file at ~/.aws/credentials")
-                return aws_config
-
             session = (
                 boto3.Session(profile_name=profile_name)
                 if profile_name
@@ -386,18 +382,37 @@ class AWSProvider:
             credentials = session.get_credentials()
 
             if not credentials or not credentials.access_key or not credentials.secret_key:
+                aws_credentials_path = os.path.expanduser("~/.aws/credentials")
+                if not os.path.exists(aws_credentials_path):
+                    log("No AWS credentials file at ~/.aws/credentials")
                 return aws_config
 
+            # Check if this is an SSO profile that needs login
+            config_path = os.path.expanduser("~/.aws/config")
+            is_sso = False
+            if os.path.exists(config_path):
+                import configparser
+                config = configparser.ConfigParser()
+                config.read(config_path)
+                section = f"profile {profile_name}" if profile_name else "default"
+                if config.has_section(section) and config.has_option(section, "sso_start_url"):
+                    is_sso = True
+
+            # Validate credentials with STS
             sts = session.client("sts")
             _ = sts.get_caller_identity()
 
-            if hasattr(credentials, "token"):
+            # For SSO profiles, check expiry and provide helpful message
+            if is_sso and hasattr(credentials, "token"):
                 creds = credentials.get_frozen_credentials()
                 if hasattr(creds, "expiry_time") and creds.expiry_time < datetime.now(
                     timezone.utc
                 ):
-                    warn(f"AWS credentials expired on {creds.expiry_time}")
-                    return aws_config
+                    login_cmd = f"aws sso login --profile {profile_name}" if profile_name else "aws sso login"
+                    error(f"AWS SSO session expired. Please run:\n  {login_cmd}")
+
+            # For non-SSO credentials (assume-role, etc), boto3 handles automatic refresh
+            # so we don't need to check expiry - just let boto3 refresh on next API call
 
         except ProfileNotFound:
             if is_raise_exception:
@@ -408,7 +423,23 @@ class AWSProvider:
                 raise
             error_code = e.response["Error"]["Code"]
             if error_code == "ExpiredToken":
-                warn("AWS credentials have expired")
+                # Check if SSO to provide better error message
+                try:
+                    config_path = os.path.expanduser("~/.aws/config")
+                    if os.path.exists(config_path):
+                        import configparser
+                        config = configparser.ConfigParser()
+                        config.read(config_path)
+                        section = f"profile {profile_name}" if profile_name else "default"
+                        if config.has_section(section) and config.has_option(section, "sso_start_url"):
+                            login_cmd = f"aws sso login --profile {profile_name}" if profile_name else "aws sso login"
+                            warn(f"AWS SSO session expired. Please run:\n  {login_cmd}")
+                        else:
+                            warn("AWS credentials have expired")
+                    else:
+                        warn("AWS credentials have expired")
+                except Exception:
+                    warn("AWS credentials have expired")
             elif error_code == "InvalidClientTokenId":
                 warn("AWS credentials are invalid. Please reconfigure:\n  aws configure\n")
             else:
@@ -543,7 +574,8 @@ class AWSProvider:
         return images[0]["ImageId"]
 
     def _get_iam_client(self):
-        return boto3.client("iam", **self.aws_config)
+        session = boto3.Session(**self.aws_config)
+        return session.client("iam")
 
     def _ensure_iam_role_and_profile(self, role_name: str) -> str:
         """Ensure IAM role and instance profile exist, return instance profile name.
@@ -630,6 +662,26 @@ class AWSProvider:
             if e.response["Error"]["Code"] != "LimitExceeded":
                 # Role might already be in profile, that's fine
                 pass
+
+        # Wait for instance profile to be fully propagated (eventual consistency)
+        # This is necessary because IAM changes may not be immediately available to EC2
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            try:
+                # Verify the instance profile exists and has the role attached
+                profile = iam.get_instance_profile(InstanceProfileName=profile_name)
+                if profile["InstanceProfile"]["Roles"]:
+                    # Instance profile is ready with roles attached
+                    if attempt > 0:
+                        log(f"Instance profile ready after {attempt + 1} attempts")
+                    break
+            except ClientError:
+                pass
+
+            if attempt < max_attempts - 1:
+                time.sleep(2)  # Wait 2 seconds before retry
+        else:
+            log(f"Warning: Instance profile may not be fully propagated yet")
 
         return profile_name
 
