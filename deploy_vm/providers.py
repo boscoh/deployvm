@@ -417,18 +417,51 @@ class AWSProvider:
         except ProfileNotFound:
             if is_raise_exception:
                 raise
+
+            # Try falling back to default credentials (environment vars, instance profile, etc.)
+            log(f"AWS profile '{profile_name}' not found, trying environment credentials...")
+            try:
+                # Temporarily unset AWS_PROFILE to allow boto3 to use environment credentials
+                old_aws_profile = os.environ.pop("AWS_PROFILE", None)
+                try:
+                    # Remove profile from config and retry with default credential chain
+                    aws_config_no_profile = {k: v for k, v in aws_config.items() if k != "profile_name"}
+                    session = boto3.Session(**aws_config_no_profile)
+                    credentials = session.get_credentials()
+
+                    if credentials and credentials.access_key and credentials.secret_key:
+                        # Validate the credentials work by calling STS
+                        sts = session.client("sts")
+                        sts.get_caller_identity()
+
+                        # Successfully found and validated credentials from environment/instance profile
+                        log("✓ Using credentials from environment or EC2 instance profile")
+                        # Update aws_config to not use the profile
+                        if "profile_name" in aws_config:
+                            del aws_config["profile_name"]
+                        return aws_config
+                finally:
+                    # Restore AWS_PROFILE environment variable
+                    if old_aws_profile:
+                        os.environ["AWS_PROFILE"] = old_aws_profile
+            except Exception as e:
+                # Fallback didn't work, continue to error message
+                pass
+
+            # If fallback didn't work, show helpful error
             available_profiles = AWSProvider._get_available_profiles()
             if available_profiles:
                 warn(
-                    f"AWS profile '{profile_name}' not found.\n"
+                    f"AWS profile '{profile_name}' not found and no environment credentials available.\n"
                     f"Available profiles: {', '.join(available_profiles)}\n"
-                    f"To configure: aws configure --profile {profile_name}"
+                    f"To configure: aws configure --profile {profile_name}\n"
+                    f"Or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables"
                 )
             else:
                 warn(
-                    f"AWS profile '{profile_name}' not found.\n"
+                    f"AWS profile '{profile_name}' not found and no environment credentials available.\n"
                     f"To configure: aws configure --profile {profile_name}\n"
-                    f"Or remove AWS_PROFILE from .env to use default credentials"
+                    f"Or remove AWS_PROFILE from .env to use environment/instance credentials"
                 )
         except ClientError as e:
             if is_raise_exception:
