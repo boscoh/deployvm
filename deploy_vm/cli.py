@@ -39,6 +39,9 @@ from .server import (
     resolve_dns_a,
     check_http_status,
     ssh_write_file,
+    setup_nginx_ip,
+    setup_nginx_ssl,
+    verify_instance,
 )
 
 app = cyclopts.App(
@@ -211,7 +214,7 @@ def cleanup_resources(
 
 
 @instance_app.command(name="verify")
-def verify_instance(
+def verify_command(
     name: str,
     *,
     domain: str | None = None,
@@ -225,86 +228,11 @@ def verify_instance(
     :param ssh_user: SSH user for connection
     :param provider_name: Cloud provider for DNS checks
     """
-    import time
-
-    data = load_instance(name)
-    ip = data["ip"]
-
-    print(f"Verifying {name} ({ip})...")
-    print("-" * 40)
-    issues = []
-
-    # SSH check
-    try:
-        uptime = ssh(ip, "uptime", user=ssh_user).strip()
-        print(f"[OK] SSH: {uptime}")
-    except Exception as e:
-        print(f"[FAIL] SSH: {e}")
-        issues.append("SSH connection failed")
-        return
-
-    ufw_status = ssh(ip, "ufw status", user=ssh_user)
-    has_80 = "80/tcp" in ufw_status
-    has_443 = "443/tcp" in ufw_status
-    if has_80 and has_443:
-        print("[OK] Firewall: ports 80, 443 open")
-    else:
-        missing = []
-        if not has_80:
-            missing.append("80")
-        if not has_443:
-            missing.append("443")
-        print(f"[FAIL] Firewall: ports {', '.join(missing)} not open")
-        issues.append(f"Firewall missing ports: {', '.join(missing)}")
-
-    nginx_status = ssh(ip, "systemctl is-active nginx 2>/dev/null || echo 'inactive'", user=ssh_user).strip()
-    if nginx_status == "active":
-        print("[OK] Nginx: running")
-    else:
-        print(f"[FAIL] Nginx: {nginx_status}")
-        issues.append("Nginx not running")
-
-    if domain:
-        dns_ip = resolve_dns_a(domain)
-        if dns_ip == ip:
-            print(f"[OK] DNS: {domain} -> {ip}")
-        elif dns_ip:
-            print(f"[FAIL] DNS: {domain} -> {dns_ip} (expected {ip})")
-            issues.append(f"DNS mismatch: {dns_ip} != {ip}")
-        else:
-            print(f"[FAIL] DNS: {domain} -> no A record found")
-            issues.append("DNS check failed")
-
-    status_code, response_line = check_http_status(f"http://{ip}")
-    if status_code and status_code in [200, 301, 302]:
-        print("[OK] HTTP: responding")
-    elif status_code:
-        print(f"[WARN] HTTP: {response_line}")
-    else:
-        print(f"[FAIL] HTTP: {response_line}")
-        issues.append("HTTP not responding")
-
-    if domain:
-        status_code, response_line = check_http_status(f"https://{domain}")
-        if status_code == 200:
-            print(f"[OK] HTTPS: {domain} responding")
-        elif status_code:
-            print(f"[WARN] HTTPS: {response_line}")
-        else:
-            print(f"[FAIL] HTTPS: {response_line}")
-            issues.append("HTTPS not responding")
-
-    print("-" * 40)
-    if issues:
-        print(f"Issues found ({len(issues)}):")
-        for issue in issues:
-            print(f"  - {issue}")
-    else:
-        print("All checks passed!")
+    verify_instance(name, domain=domain, ssh_user=ssh_user, provider_name=provider_name)
 
 
 @nginx_app.command(name="ip")
-def setup_nginx_ip(
+def nginx_ip_command(
     target: str,
     *,
     port: int = 3000,
@@ -312,30 +240,12 @@ def setup_nginx_ip(
     ssh_user: str = "root",
 ):
     """Setup nginx for IP-only access (no SSL)."""
-    from textwrap import dedent
-
     ip = resolve_ip(target)
-
-    ensure_web_firewall(ip, ssh_user=ssh_user)
-
-    server_block = generate_nginx_server_block("_", port, static_dir, listen="80 default_server")
-
-    sudo = get_sudo_prefix(ssh_user)
-    log(f"Setting up nginx for IP access on {ip}...")
-    ssh_script(ip, f"{sudo}apt-get update && {sudo}apt-get install -y nginx", user=ssh_user)
-    ssh_write_file(ip, "/etc/nginx/sites-available/default", server_block, user=ssh_user)
-    ssh_script(
-        ip,
-        f"{sudo}ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/ && {sudo}nginx -t && {sudo}systemctl reload nginx",
-        user=ssh_user,
-    )
-
-    verify_http(ip)
-    log(f"Nginx configured! http://{ip}")
+    setup_nginx_ip(ip, port=port, static_dir=static_dir, ssh_user=ssh_user)
 
 
 @nginx_app.command(name="ssl")
-def setup_nginx_ssl(
+def nginx_ssl_command(
     target: str,
     domain: str,
     email: str,
@@ -347,59 +257,17 @@ def setup_nginx_ssl(
     provider_name: ProviderName = "digitalocean",
 ):
     """Setup nginx and SSL certificate."""
-    import time
-    from textwrap import dedent
-
     ip = resolve_ip(target)
-
-    ensure_web_firewall(ip, ssh_user=ssh_user)
-    if not skip_dns:
-        ensure_dns_matches(domain, ip, provider_name=provider_name)
-
-    server_block = generate_nginx_server_block(f"{domain} www.{domain}", port, static_dir)
-
-    sudo = get_sudo_prefix(ssh_user)
-    log("Setting up nginx...")
-    ssh_script(ip, f"{sudo}apt-get update && {sudo}apt-get install -y nginx", user=ssh_user)
-    ssh_write_file(ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user)
-    ssh_script(
+    setup_nginx_ssl(
         ip,
-        f"{sudo}ln -sf /etc/nginx/sites-available/{domain} /etc/nginx/sites-enabled/ && "
-        f"{sudo}rm -f /etc/nginx/sites-enabled/default && {sudo}nginx -t && {sudo}systemctl reload nginx",
-        user=ssh_user,
+        domain,
+        email,
+        port=port,
+        static_dir=static_dir,
+        skip_dns=skip_dns,
+        ssh_user=ssh_user,
+        provider_name=provider_name,
     )
-
-    log("Verifying DNS...")
-    from .server import DNS_VERIFY_RETRIES, DNS_VERIFY_DELAY
-    for i in range(DNS_VERIFY_RETRIES):
-        resolved = resolve_dns_a(domain)
-        if resolved == ip:
-            log(f"DNS verified: {domain} -> {ip}")
-            break
-        warn(f"Waiting for DNS... ({i + 1}/{DNS_VERIFY_RETRIES})")
-        time.sleep(DNS_VERIFY_DELAY)
-    else:
-        error("DNS verification timeout")
-
-    verify_http(ip)
-
-    log("Obtaining SSL certificate...")
-    ssl_script = dedent(f"""
-        set -e
-        {sudo}apt-get install -y certbot python3-certbot-nginx
-        if [ -d "/etc/letsencrypt/live/{domain}" ]; then
-            echo "Certificate exists, renewing if needed..."
-            {sudo}certbot --nginx -d {domain} -d www.{domain} \\
-                --non-interactive --agree-tos --email {email} \\
-                --redirect --keep-until-expiring
-        else
-            echo "Issuing new certificate..."
-            {sudo}certbot --nginx -d {domain} -d www.{domain} \\
-                --non-interactive --agree-tos --email {email} --redirect
-        fi
-    """).strip()
-    ssh_script(ip, ssl_script, user=ssh_user)
-    log(f"SSL configured! https://{domain}")
 
 
 @nuxt_app.command(name="sync")
@@ -549,10 +417,10 @@ def deploy_nuxt(
 
     nuxt_static_dir = f"/home/{user}/{app_name}/.output/public"
     if no_ssl:
-        setup_nginx_ip(name, port=port, static_dir=nuxt_static_dir, ssh_user=ssh_user)
+        setup_nginx_ip(ip, port=port, static_dir=nuxt_static_dir, ssh_user=ssh_user)
     else:
         setup_nginx_ssl(
-            name,
+            ip,
             domain,
             email,
             port=port,
@@ -732,10 +600,10 @@ def deploy_fastapi(
 
     static_dir = f"/home/{user}/{app_name}/{static_subdir}" if static_subdir else None
     if no_ssl:
-        setup_nginx_ip(name, port=port, static_dir=static_dir, ssh_user=ssh_user)
+        setup_nginx_ip(ip, port=port, static_dir=static_dir, ssh_user=ssh_user)
     else:
         setup_nginx_ssl(
-            name,
+            ip,
             domain,
             email,
             port=port,
