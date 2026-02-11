@@ -6,18 +6,14 @@ import subprocess
 from pathlib import Path
 from textwrap import dedent
 
+from .utils import error, get_ssh_user, get_sudo_prefix, log, warn
 from .server import (
-    log,
-    warn,
-    error,
     ssh,
     ssh_script,
     ssh_write_file,
     ssh_as_user,
     rsync,
-    get_ssh_user,
 )
-from .utils import get_sudo_prefix
 
 
 def compute_hash(source: str, exclude: list[str] | None = None) -> str:

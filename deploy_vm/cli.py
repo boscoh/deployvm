@@ -20,10 +20,8 @@ from rich import print
 
 from .apps import NuxtApp, FastAPIApp
 from .providers import get_provider, ProviderName
+from .utils import error, get_ssh_user, get_sudo_prefix, log, resolve_app_name, warn
 from .server import (
-    log,
-    warn,
-    error,
     ssh,
     ssh_script,
     resolve_ip,
@@ -38,12 +36,10 @@ from .server import (
     ensure_web_firewall,
     ensure_dns_matches,
     generate_nginx_server_block,
-    get_ssh_user,
     resolve_dns_a,
     check_http_status,
     ssh_write_file,
 )
-from .utils import get_sudo_prefix, resolve_app_name
 
 app = cyclopts.App(
     name="deploy-vm", help="Deploy apps to cloud providers", sort_key=None
