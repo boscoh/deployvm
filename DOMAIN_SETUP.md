@@ -75,8 +75,17 @@ Domain support is **already implemented** for both providers through the followi
      --caller-reference $(date +%s)
    ```
 
-2. **Update Domain Registrar**: Point nameservers to AWS Route53
-   - Find nameservers: `aws route53 get-hosted-zone --id <zone-id>`
+2. **Get Nameservers**:
+   ```bash
+   # Using deploy-vm (recommended)
+   uv run deploy-vm dns nameservers example.com --provider-name aws
+
+   # Or using AWS CLI
+   aws route53 get-hosted-zone --id <zone-id>
+   ```
+
+3. **Update Domain Registrar**: Point nameservers to AWS Route53
+   - Use nameservers from step 2
    - Update at your domain registrar (GoDaddy, Namecheap, etc.)
    - Example nameservers:
      ```
@@ -86,7 +95,7 @@ Domain support is **already implemented** for both providers through the followi
      ns-3456.awsdns-78.co.uk
      ```
 
-3. **Verify Propagation** (24-48 hours):
+4. **Verify Propagation** (24-48 hours):
    ```bash
    dig example.com NS
    # Should show Route53 nameservers
@@ -174,6 +183,25 @@ uv run deploy-vm nginx ssl my-server newdomain.com admin@example.com
 # Method 2: Manually update DNS (not implemented yet)
 # Would require: deploy-vm dns update newdomain.com <instance-name>
 ```
+
+### Pattern 5: Check Domain Nameservers
+
+Get nameservers for your domain before deployment:
+
+```bash
+# AWS - Shows Route53 nameservers
+uv run deploy-vm dns nameservers example.com --provider-name aws
+
+# DigitalOcean - Shows DigitalOcean nameservers
+uv run deploy-vm dns nameservers example.com --provider-name digitalocean
+```
+
+**What happens**:
+1. For AWS: Queries Route53 for hosted zone nameservers
+2. For DigitalOcean: Shows static DigitalOcean nameservers
+3. Displays setup instructions for domain registrar
+
+**Use case**: Verify domain is configured correctly before attempting deployment.
 
 ## Implementation Details
 
@@ -362,21 +390,30 @@ uv run deploy-vm nginx ssl my-server api.example.com admin@example.com
 - Separate SSL certificates per domain
 - Domain-to-app routing
 
-### 4. DNS-only Command
+### 4. DNS Commands
 
-**Current gap**: No standalone DNS update command
+**Status**: ✅ Partially implemented
 
-**Proposal**:
+**Available**:
 ```bash
+# Get nameservers for a domain (implemented)
+uv run deploy-vm dns nameservers example.com --provider-name aws
+uv run deploy-vm dns nameservers example.com --provider-name digitalocean
+```
+
+**Future enhancements**:
+```bash
+# Standalone DNS update (not yet implemented)
 uv run deploy-vm dns update example.com <instance-name>
 uv run deploy-vm dns list <instance-name>
 uv run deploy-vm dns delete example.com
 ```
 
-**Implementation**:
-- Add `dns_app` to cli.py
-- Call `provider.setup_dns()` directly
-- Skip nginx/SSL configuration
+**Implementation notes**:
+- `dns_app` added to cli.py
+- `nameservers` command shows Route53 or DigitalOcean NS records
+- Future commands would call `provider.setup_dns()` directly
+- Would skip nginx/SSL configuration
 
 ### 5. Certificate Renewal Automation
 
