@@ -20,7 +20,7 @@ if [ "$1" = "--ssl" ]; then
     uv run deploy-vm fastapi deploy \
         chatboti \
         "$SCRIPT_DIR/../chatboti" \
-        --provider "$PROVIDER" \
+        --provider-name "$PROVIDER" \
         --region "$REGION" \
         --vm-size "$VM_SIZE" \
         --app-module "$APP_MODULE" \
@@ -34,7 +34,7 @@ else
     uv run deploy-vm fastapi deploy \
         chatboti \
         "$SCRIPT_DIR/../chatboti" \
-        --provider "$PROVIDER" \
+        --provider-name "$PROVIDER" \
         --region "$REGION" \
         --vm-size "$VM_SIZE" \
         --app-module "$APP_MODULE" \
