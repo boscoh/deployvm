@@ -356,17 +356,14 @@ class AWSProvider:
     def get_aws_config(is_raise_exception: bool = True):
         """Get AWS configuration for boto3 client initialization.
 
-        Checks if AWS_PROFILE exists before using it, allowing boto3 to naturally
-        fall back to environment variables or EC2 instance profile if the profile
-        doesn't exist. Validates credentials via STS GetCallerIdentity.
+        Falls back to boto3's credential chain if AWS_PROFILE doesn't exist.
 
+        :param is_raise_exception: Raise exceptions or warn on errors
         :return: Dict with profile_name and region_name keys
         """
         load_dotenv()
 
         aws_config = {}
-
-        # Get available AWS profiles from ~/.aws/credentials and ~/.aws/config
         available_profiles = set()
         credentials_path = os.path.expanduser("~/.aws/credentials")
         config_path = os.path.expanduser("~/.aws/config")
@@ -383,19 +380,16 @@ class AWSProvider:
             config.read(config_path)
             for section in config.sections():
                 if section.startswith("profile "):
-                    available_profiles.add(section[8:])  # Remove 'profile ' prefix
+                    available_profiles.add(section[8:])
                 elif section != "default":
                     available_profiles.add(section)
 
-        # Only add profile if it actually exists - let boto3 handle credential chain
         profile_name = os.getenv("AWS_PROFILE")
         profile_not_found = False
         if profile_name:
             if profile_name in available_profiles:
                 aws_config["profile_name"] = profile_name
             else:
-                # Profile doesn't exist - let boto3 use default credential chain
-                # (env vars, instance profile, etc.)
                 log(f"AWS profile '{profile_name}' not found, using default credential chain...")
                 profile_not_found = True
 
@@ -403,17 +397,10 @@ class AWSProvider:
         if region:
             aws_config["region_name"] = region
 
-        # Unset AWS_PROFILE if profile doesn't exist so boto3 can use credential chain
-        # Don't restore it - leave it unset for all subsequent boto3 calls
         if profile_not_found:
             os.environ.pop("AWS_PROFILE", None)
 
         try:
-            # boto3 automatically handles credential chain:
-            # 1. Env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-            # 2. ~/.aws/credentials and ~/.aws/config
-            # 3. EC2 instance metadata (IAM role)
-            # 4. Container credentials (ECS)
             session = boto3.Session(**aws_config)
             credentials = session.get_credentials()
 
@@ -434,11 +421,9 @@ class AWSProvider:
                         )
                 return aws_config
 
-            # Validate credentials work by calling STS
             sts = session.client("sts")
             sts.get_caller_identity()
 
-            # Check if this is an SSO profile that needs login (for better error messages)
             if profile_name and profile_name in aws_config.get("profile_name", ""):
                 config_path = os.path.expanduser("~/.aws/config")
                 if os.path.exists(config_path):
@@ -447,7 +432,6 @@ class AWSProvider:
                     config.read(config_path)
                     section = f"profile {profile_name}"
                     if config.has_section(section) and config.has_option(section, "sso_start_url"):
-                        # SSO profile - check for expiry
                         if hasattr(credentials, "token"):
                             creds = credentials.get_frozen_credentials()
                             if hasattr(creds, "expiry_time") and creds.expiry_time < datetime.now(timezone.utc):
@@ -495,7 +479,13 @@ class AWSProvider:
             error(f"AWS authentication failed: {e}")
 
     def _validate_and_normalize_region(self, region: str) -> str:
-        """Validate and normalize AWS region (converts AZ to region if needed)."""
+        """Validate and normalize AWS region.
+
+        Converts availability zone (e.g., us-east-1a) to region (us-east-1).
+
+        :param region: AWS region or availability zone
+        :return: Normalized region name
+        """
         valid_regions = PROVIDER_OPTIONS["aws"]["regions"]
 
         if region and region[-1].isalpha() and region[:-1] in valid_regions:
@@ -529,7 +519,10 @@ class AWSProvider:
         return self._get_session().client("route53")
 
     def _validate_vpc(self, ec2, vpc_id: str) -> tuple[bool, str | None]:
-        """:return: (is_valid, error_message)"""
+        """Validate VPC has required components (subnets, IGW, route table).
+
+        :return: (is_valid, error_message)
+        """
         subnets = ec2.describe_subnets(
             Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
         )["Subnets"]
@@ -607,30 +600,23 @@ class AWSProvider:
         return images[0]["ImageId"]
 
     def _get_session(self):
-        """Get boto3 session using aws_config.
-
-        Note: AWS_PROFILE was already unset in get_aws_config() if profile doesn't exist,
-        so boto3 will use the natural credential chain (env vars, instance profile, etc.)
-        """
+        """Get boto3 session using aws_config."""
         return boto3.Session(**self.aws_config)
 
     def _get_iam_client(self):
         return self._get_session().client("iam")
 
     def _ensure_iam_role_and_profile(self, role_name: str) -> str:
-        """Ensure IAM role and instance profile exist, return instance profile name.
+        """Ensure IAM role and instance profile exist with Bedrock access.
 
-        Creates:
-        1. IAM role with EC2 trust policy
-        2. Attaches AmazonBedrockFullAccess policy
-        3. Instance profile with same name
-        4. Adds role to instance profile
+        Creates IAM role with EC2 trust policy, attaches AmazonBedrockFullAccess,
+        creates instance profile, and adds role to profile.
 
-        Returns the instance profile name (same as role name).
+        :param role_name: Name for both IAM role and instance profile
+        :return: Instance profile name
         """
         iam = self._get_iam_client()
 
-        # EC2 assume role trust policy
         trust_policy = {
             "Version": "2012-10-17",
             "Statement": [
@@ -642,7 +628,6 @@ class AWSProvider:
             ]
         }
 
-        # Create IAM role if it doesn't exist
         try:
             iam.get_role(RoleName=role_name)
             log(f"Using existing IAM role: {role_name}")
@@ -662,17 +647,14 @@ class AWSProvider:
             else:
                 raise
 
-        # Attach AmazonBedrockFullAccess managed policy
         bedrock_policy_arn = "arn:aws:iam::aws:policy/AmazonBedrockFullAccess"
         try:
             iam.attach_role_policy(RoleName=role_name, PolicyArn=bedrock_policy_arn)
             log(f"Attached AmazonBedrockFullAccess policy to {role_name}")
         except ClientError as e:
             if e.response["Error"]["Code"] != "EntityAlreadyExists":
-                # Policy might already be attached, that's fine
                 pass
 
-        # Create instance profile if it doesn't exist
         profile_name = role_name
         try:
             iam.get_instance_profile(InstanceProfileName=profile_name)
@@ -691,7 +673,6 @@ class AWSProvider:
             else:
                 raise
 
-        # Add role to instance profile
         try:
             iam.add_role_to_instance_profile(
                 InstanceProfileName=profile_name,
@@ -700,18 +681,13 @@ class AWSProvider:
             log(f"Added role {role_name} to instance profile")
         except ClientError as e:
             if e.response["Error"]["Code"] != "LimitExceeded":
-                # Role might already be in profile, that's fine
                 pass
 
-        # Wait for instance profile to be fully propagated (eventual consistency)
-        # This is necessary because IAM changes may not be immediately available to EC2
         max_attempts = 10
         for attempt in range(max_attempts):
             try:
-                # Verify the instance profile exists and has the role attached
                 profile = iam.get_instance_profile(InstanceProfileName=profile_name)
                 if profile["InstanceProfile"]["Roles"]:
-                    # Instance profile is ready with roles attached
                     if attempt > 0:
                         log(f"Instance profile ready after {attempt + 1} attempts")
                     break
@@ -719,7 +695,7 @@ class AWSProvider:
                 pass
 
             if attempt < max_attempts - 1:
-                time.sleep(2)  # Wait 2 seconds before retry
+                time.sleep(2)
         else:
             log(f"Warning: Instance profile may not be fully propagated yet")
 
