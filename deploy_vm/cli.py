@@ -13,36 +13,29 @@ Examples:
 """
 
 from pathlib import Path
-from typing import Literal
 
 import cyclopts
 from rich import print
 
-from .apps import NuxtApp, FastAPIApp
-from .providers import get_provider, ProviderName
-from .utils import error, get_ssh_user, get_sudo_prefix, log, resolve_app_name, warn
+from .apps import FastAPIApp, NuxtApp
+from .providers import ProviderName, get_provider
 from .server import (
-    ssh,
-    ssh_script,
-    resolve_ip,
-    resolve_instance,
-    load_instance,
-    save_instance,
-    get_instance_apps,
     add_app_to_instance,
-    wait_for_ssh,
-    verify_http,
-    setup_server,
-    ensure_web_firewall,
     ensure_dns_matches,
-    generate_nginx_server_block,
-    resolve_dns_a,
-    check_http_status,
-    ssh_write_file,
+    ensure_web_firewall,
+    get_instance_apps,
+    load_instance,
+    resolve_instance,
+    resolve_ip,
+    save_instance,
     setup_nginx_ip,
     setup_nginx_ssl,
+    setup_server,
+    ssh,
     verify_instance,
+    wait_for_ssh,
 )
+from .utils import error, get_ssh_user, log, resolve_app_name, warn
 
 app = cyclopts.App(
     name="deploy-vm", help="Deploy apps to cloud providers", sort_key=None
@@ -81,7 +74,9 @@ def create_instance(
     """
     p = get_provider(provider_name, region=region, os_image=os_image, vm_size=vm_size)
 
-    log(f"Creating instance '{name}' on {p.provider_name} in {p.region} ({p.vm_size})...")
+    log(
+        f"Creating instance '{name}' on {p.provider_name} in {p.region} ({p.vm_size})..."
+    )
     result = p.create_instance(name, p.region, p.vm_size)
 
     save_instance(
@@ -164,9 +159,9 @@ def list_instances(
         log(f"No instances found in {p.region}")
         return
 
-    max_name = max(len(i['name']) for i in instances)
-    max_ip = max(len(i['ip']) for i in instances)
-    max_region = max(len(i['region']) for i in instances)
+    max_name = max(len(i["name"]) for i in instances)
+    max_ip = max(len(i["ip"]) for i in instances)
+    max_region = max(len(i["region"]) for i in instances)
 
     name_header = "NAME".ljust(max_name)
     ip_header = "IP ADDRESS".ljust(max_ip)
@@ -175,9 +170,9 @@ def list_instances(
     print(f"  {'-' * max_name}  {'-' * max_ip}  {'-' * max_region}  {'---'}")
 
     for i in instances:
-        name = i['name'].ljust(max_name)
-        ip = i['ip'].ljust(max_ip)
-        region = i['region'].ljust(max_region)
+        name = i["name"].ljust(max_name)
+        ip = i["ip"].ljust(max_ip)
+        region = i["region"].ljust(max_region)
         print(f"  {name}  {ip}  {region}  {i['status']}")
 
 
@@ -192,7 +187,7 @@ def list_instance_apps(target: str):
 
     print(f"Apps on {target} ({instance['ip']}):")
     for app in apps:
-        port_info = f" (port {app.get('port', '?')})" if app.get('port') else ""
+        port_info = f" (port {app.get('port', '?')})" if app.get("port") else ""
         print(f"  - {app['name']}: {app['type']}{port_info}")
 
 
@@ -219,16 +214,14 @@ def verify_command(
     *,
     domain: str | None = None,
     ssh_user: str = "root",
-    provider_name: ProviderName = "digitalocean",
 ):
     """Verify instance health: SSH, firewall, DNS, nginx, app.
 
     :param name: Instance name
     :param domain: Domain to check DNS for
     :param ssh_user: SSH user for connection
-    :param provider_name: Cloud provider for DNS checks
     """
-    verify_instance(name, domain=domain, ssh_user=ssh_user, provider_name=provider_name)
+    verify_instance(name, domain=domain, ssh_user=ssh_user)
 
 
 @nginx_app.command(name="ip")
@@ -276,7 +269,6 @@ def sync_nuxt(
     source: str,
     *,
     user: str | None = None,
-    ssh_user: str = "root",
     port: int = 3000,
     app_name: str = "nuxt",
     local_build: bool = True,
@@ -297,12 +289,24 @@ def sync_nuxt(
         add_app_to_instance(instance, app_name, "nuxt", port)
         save_instance(target, instance)
 
-    nuxt = NuxtApp(instance, provider, user=user, app_name=app_name, port=port, node_version=node_version)
+    nuxt = NuxtApp(
+        instance,
+        provider,
+        user=user,
+        app_name=app_name,
+        port=port,
+        node_version=node_version,
+    )
     nuxt.sync(source, local_build=local_build, force=force)
 
 
 @nuxt_app.command(name="restart")
-def restart_pm2(target: str, *, user: str | None = None, ssh_user: str = "root", app_name: str | None = None):
+def restart_pm2(
+    target: str,
+    *,
+    user: str | None = None,
+    app_name: str | None = None,
+):
     instance = resolve_instance(target)
     user = user or instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
@@ -317,7 +321,7 @@ def restart_pm2(target: str, *, user: str | None = None, ssh_user: str = "root",
 
 
 @nuxt_app.command(name="status")
-def show_pm2_status(target: str, *, user: str | None = None, ssh_user: str = "root"):
+def show_pm2_status(target: str, *, user: str | None = None):
     instance = resolve_instance(target)
     user = user or instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
@@ -328,13 +332,16 @@ def show_pm2_status(target: str, *, user: str | None = None, ssh_user: str = "ro
 
 @nuxt_app.command(name="logs")
 def show_pm2_logs(
-    target: str, *, user: str | None = None, ssh_user: str = "root", lines: int = 50, app_name: str | None = None
+    target: str,
+    *,
+    user: str | None = None,
+    lines: int = 50,
+    app_name: str | None = None,
 ):
     """View PM2 logs.
 
     :param target: Server IP address or instance name (loads from <name>.instance.json)
     :param user: App user (reads from instance.json if not specified)
-    :param ssh_user: SSH user for connection
     :param lines: Number of lines to show
     :param app_name: PM2 app name (required if multiple apps exist on instance)
     """
@@ -471,7 +478,13 @@ def sync_fastapi(
         save_instance(target, instance)
 
     fastapi = FastAPIApp(
-        instance, provider, user=user, app_name=app_name, port=port, app_module=app_module, workers=workers
+        instance,
+        provider,
+        user=user,
+        app_name=app_name,
+        port=port,
+        app_module=app_module,
+        workers=workers,
     )
     return fastapi.sync(source, force=force)
 
@@ -511,7 +524,11 @@ def show_supervisor_status(target: str, *, ssh_user: str | None = None):
 
 @fastapi_app.command(name="logs")
 def show_supervisor_logs(
-    target: str, *, app_name: str | None = None, ssh_user: str | None = None, lines: int = 50
+    target: str,
+    *,
+    app_name: str | None = None,
+    ssh_user: str | None = None,
+    lines: int = 50,
 ):
     instance = resolve_instance(target)
     provider = instance.get("provider", "digitalocean")

@@ -1,14 +1,13 @@
 """Deploy VM - Cloud deployment tool for DigitalOcean and AWS."""
 
+from .cli import app
 from .providers import (
+    PROVIDER_OPTIONS,
     AWSProvider,
     DigitalOceanProvider,
     Provider,
-    PROVIDER_OPTIONS,
     get_provider,
 )
-from .cli import app
-from .utils import error, get_ssh_user, log, run_cmd, run_cmd_json, warn
 from .types import (
     AppInfo,
     AppType,
@@ -17,6 +16,7 @@ from .types import (
     InstanceResult,
     ProviderName,
 )
+from .utils import error, get_ssh_user, log, run_cmd, run_cmd_json, warn
 
 __all__ = [
     "AWSProvider",

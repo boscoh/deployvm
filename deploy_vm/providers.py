@@ -18,27 +18,68 @@ ProviderName = Literal["digitalocean", "aws"]
 
 PROVIDER_OPTIONS = {
     "digitalocean": {
-        "regions": ["syd1", "sgp1", "nyc1", "nyc3", "sfo3", "lon1", "fra1", "ams3", "tor1", "blr1"],
-        "vm_sizes": ["s-1vcpu-512mb", "s-1vcpu-1gb", "s-1vcpu-2gb", "s-2vcpu-2gb", "s-2vcpu-4gb", "s-4vcpu-8gb"],
+        "regions": [
+            "syd1",
+            "sgp1",
+            "nyc1",
+            "nyc3",
+            "sfo3",
+            "lon1",
+            "fra1",
+            "ams3",
+            "tor1",
+            "blr1",
+        ],
+        "vm_sizes": [
+            "s-1vcpu-512mb",
+            "s-1vcpu-1gb",
+            "s-1vcpu-2gb",
+            "s-2vcpu-2gb",
+            "s-2vcpu-4gb",
+            "s-4vcpu-8gb",
+        ],
         "os_images": ["ubuntu-24-04-x64", "ubuntu-22-04-x64", "ubuntu-20-04-x64"],
     },
     "aws": {
-        "regions": ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "ca-central-1",
-                    "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-north-1",
-                    "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "ap-northeast-2",
-                    "ap-south-1", "sa-east-1"],
-        "vm_sizes": ["t3.micro", "t3.small", "t3.medium", "t3.large", "t3.xlarge", "t3.2xlarge",
-                     "t4g.micro", "t4g.small", "t4g.medium", "t4g.large",
-                     "m5.large", "m5.xlarge", "m5.2xlarge"],
-        "os_images": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*",
-                      "ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*"],
+        "regions": [
+            "us-east-1",
+            "us-east-2",
+            "us-west-1",
+            "us-west-2",
+            "ca-central-1",
+            "eu-west-1",
+            "eu-west-2",
+            "eu-west-3",
+            "eu-central-1",
+            "eu-north-1",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-south-1",
+            "sa-east-1",
+        ],
+        "vm_sizes": [
+            "t3.micro",
+            "t3.small",
+            "t3.medium",
+            "t3.large",
+            "t3.xlarge",
+            "t3.2xlarge",
+            "t4g.micro",
+            "t4g.small",
+            "t4g.medium",
+            "t4g.large",
+            "m5.large",
+            "m5.xlarge",
+            "m5.2xlarge",
+        ],
+        "os_images": [
+            "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*",
+            "ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*",
+        ],
     },
 }
-
-
-
-
-
 
 
 def get_local_ssh_key() -> tuple[str, str]:
@@ -118,10 +159,7 @@ def get_aws_config(is_raise_exception: bool = True):
         if error_code == "ExpiredToken":
             warn("AWS credentials have expired")
         elif error_code == "InvalidClientTokenId":
-            warn(
-                "AWS credentials are invalid. Please reconfigure:\n"
-                "  aws configure\n"
-            )
+            warn("AWS credentials are invalid. Please reconfigure:\n  aws configure\n")
         else:
             warn(f"AWS API error: {error_code}")
     except Exception as e:
@@ -176,7 +214,11 @@ class DigitalOceanProvider:
             error("doctl not authenticated. Run: doctl auth init")
 
     def validate_config(self) -> None:
-        if self.vm_size.startswith("t3.") or self.vm_size.startswith("t4g.") or self.vm_size.startswith("m5."):
+        if (
+            self.vm_size.startswith("t3.")
+            or self.vm_size.startswith("t4g.")
+            or self.vm_size.startswith("m5.")
+        ):
             error(
                 f"VM size '{self.vm_size}' is an AWS instance type, not DigitalOcean.\n"
                 f"DigitalOcean sizes: s-1vcpu-1gb, s-2vcpu-2gb, s-4vcpu-8gb, etc.\n"
@@ -350,7 +392,9 @@ class AWSProvider:
         vm_size: str | None = None,
     ):
         self.provider_name: ProviderName = "aws"
-        self.os_image = os_image or "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
+        self.os_image = (
+            os_image or "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
+        )
         self.vm_size = vm_size or "t3.micro"
         self.aws_config = get_aws_config(is_raise_exception=False)
 
@@ -385,7 +429,9 @@ class AWSProvider:
 
         if region and region[-1].isalpha() and region[:-1] in valid_regions:
             normalized_region = region[:-1]
-            log(f"Converted availability zone '{region}' to region '{normalized_region}'")
+            log(
+                f"Converted availability zone '{region}' to region '{normalized_region}'"
+            )
             return normalized_region
 
         if region not in valid_regions:
@@ -439,7 +485,7 @@ class AWSProvider:
                 route_tables = ec2.describe_route_tables(
                     Filters=[
                         {"Name": "vpc-id", "Values": [vpc_id]},
-                        {"Name": "association.main", "Values": ["true"]}
+                        {"Name": "association.main", "Values": ["true"]},
                     ]
                 )["RouteTables"]
 
@@ -454,17 +500,23 @@ class AWSProvider:
                 break
 
         if not has_public_subnet:
-            return False, "No public subnets found (subnets need route to internet gateway)"
+            return (
+                False,
+                "No public subnets found (subnets need route to internet gateway)",
+            )
 
         return True, None
 
     def _get_my_ip(self) -> str:
         try:
             import urllib.request
-            response = urllib.request.urlopen('https://api.ipify.org', timeout=5)
-            return response.read().decode('utf8')
+
+            response = urllib.request.urlopen("https://api.ipify.org", timeout=5)
+            return response.read().decode("utf8")
         except Exception:
-            log("[WARN] Could not determine your public IP, using 0.0.0.0/0 for SSH access")
+            log(
+                "[WARN] Could not determine your public IP, using 0.0.0.0/0 for SSH access"
+            )
             return None
 
     def _find_ami(self, ec2_client) -> str:
@@ -480,7 +532,9 @@ class AWSProvider:
         if not response["Images"]:
             error(f"No AMI found matching pattern: {self.os_image}")
 
-        images = sorted(response["Images"], key=lambda x: x["CreationDate"], reverse=True)
+        images = sorted(
+            response["Images"], key=lambda x: x["CreationDate"], reverse=True
+        )
         return images[0]["ImageId"]
 
     def instance_exists(self, name: str) -> bool:
@@ -488,7 +542,10 @@ class AWSProvider:
         response = ec2.describe_instances(
             Filters=[
                 {"Name": "tag:Name", "Values": [name]},
-                {"Name": "instance-state-name", "Values": ["running", "pending", "stopping", "stopped"]},
+                {
+                    "Name": "instance-state-name",
+                    "Values": ["running", "pending", "stopping", "stopped"],
+                },
             ]
         )
         return len(response["Reservations"]) > 0
@@ -546,16 +603,23 @@ class AWSProvider:
                 log(f"Using existing security group: {sg_name}")
             else:
                 raise ClientError(
-                    {"Error": {"Code": "InvalidGroup.NotFound"}}, "DescribeSecurityGroups"
+                    {"Error": {"Code": "InvalidGroup.NotFound"}},
+                    "DescribeSecurityGroups",
                 )
         except ClientError as e:
-            if e.response["Error"]["Code"] in ["InvalidGroup.NotFound", "VPCIdNotSpecified"]:
+            if e.response["Error"]["Code"] in [
+                "InvalidGroup.NotFound",
+                "VPCIdNotSpecified",
+            ]:
                 log("Creating security group...")
 
                 vpcs = ec2.describe_vpcs()["Vpcs"]
                 if not vpcs:
-                    error("No VPC found in this region. Please create a VPC first:\n"
-                          "  aws ec2 create-default-vpc --region " + self.aws_config.get("region_name", "ap-southeast-2"))
+                    error(
+                        "No VPC found in this region. Please create a VPC first:\n"
+                        "  aws ec2 create-default-vpc --region "
+                        + self.aws_config.get("region_name", "ap-southeast-2")
+                    )
 
                 default_vpc = next((v for v in vpcs if v.get("IsDefault")), None)
                 vpc_id = default_vpc["VpcId"] if default_vpc else vpcs[0]["VpcId"]
@@ -577,14 +641,19 @@ class AWSProvider:
                     GroupName=sg_name,
                     Description="Security group for deploy-vm web servers",
                     VpcId=vpc_id,
-                    TagSpecifications=[{
-                        "ResourceType": "security-group",
-                        "Tags": [
-                            {"Key": "Name", "Value": sg_name},
-                            {"Key": "ManagedBy", "Value": "deploy-vm"},
-                            {"Key": "CreatedAt", "Value": datetime.now(timezone.utc).isoformat()},
-                        ]
-                    }]
+                    TagSpecifications=[
+                        {
+                            "ResourceType": "security-group",
+                            "Tags": [
+                                {"Key": "Name", "Value": sg_name},
+                                {"Key": "ManagedBy", "Value": "deploy-vm"},
+                                {
+                                    "Key": "CreatedAt",
+                                    "Value": datetime.now(timezone.utc).isoformat(),
+                                },
+                            ],
+                        }
+                    ],
                 )
                 sg_id = response["GroupId"]
 
@@ -600,19 +669,25 @@ class AWSProvider:
                             "IpProtocol": "tcp",
                             "FromPort": 22,
                             "ToPort": 22,
-                            "IpRanges": [{"CidrIp": ssh_cidr, "Description": "SSH access"}],
+                            "IpRanges": [
+                                {"CidrIp": ssh_cidr, "Description": "SSH access"}
+                            ],
                         },
                         {
                             "IpProtocol": "tcp",
                             "FromPort": 80,
                             "ToPort": 80,
-                            "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": "HTTP access"}],
+                            "IpRanges": [
+                                {"CidrIp": "0.0.0.0/0", "Description": "HTTP access"}
+                            ],
                         },
                         {
                             "IpProtocol": "tcp",
                             "FromPort": 443,
                             "ToPort": 443,
-                            "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": "HTTPS access"}],
+                            "IpRanges": [
+                                {"CidrIp": "0.0.0.0/0", "Description": "HTTPS access"}
+                            ],
                         },
                     ],
                 )
@@ -634,7 +709,10 @@ class AWSProvider:
                     "Tags": [
                         {"Key": "Name", "Value": name},
                         {"Key": "ManagedBy", "Value": "deploy-vm"},
-                        {"Key": "CreatedAt", "Value": datetime.now(timezone.utc).isoformat()},
+                        {
+                            "Key": "CreatedAt",
+                            "Value": datetime.now(timezone.utc).isoformat(),
+                        },
                         {"Key": "CreatedBy", "Value": os.getenv("USER", "unknown")},
                     ],
                 }
@@ -669,7 +747,10 @@ class AWSProvider:
         ec2 = self._get_ec2_client()
         response = ec2.describe_instances(
             Filters=[
-                {"Name": "instance-state-name", "Values": ["running", "pending", "stopping", "stopped"]}
+                {
+                    "Name": "instance-state-name",
+                    "Values": ["running", "pending", "stopping", "stopped"],
+                }
             ]
         )
 
@@ -677,15 +758,21 @@ class AWSProvider:
         for reservation in response["Reservations"]:
             for instance in reservation["Instances"]:
                 name = next(
-                    (tag["Value"] for tag in instance.get("Tags", []) if tag["Key"] == "Name"),
+                    (
+                        tag["Value"]
+                        for tag in instance.get("Tags", [])
+                        if tag["Key"] == "Name"
+                    ),
                     instance["InstanceId"],
                 )
-                instances.append({
-                    "name": name,
-                    "ip": instance.get("PublicIpAddress", "N/A"),
-                    "status": instance["State"]["Name"],
-                    "region": instance["Placement"]["AvailabilityZone"],
-                })
+                instances.append(
+                    {
+                        "name": name,
+                        "ip": instance.get("PublicIpAddress", "N/A"),
+                        "status": instance["State"]["Name"],
+                        "region": instance["Placement"]["AvailabilityZone"],
+                    }
+                )
 
         return instances
 
@@ -759,16 +846,23 @@ class AWSProvider:
                 instances = ec2.describe_instances(
                     Filters=[
                         {"Name": "instance.group-id", "Values": [sg_id]},
-                        {"Name": "instance-state-name", "Values": ["running", "pending", "stopping"]}
+                        {
+                            "Name": "instance-state-name",
+                            "Values": ["running", "pending", "stopping"],
+                        },
                     ]
                 )["Reservations"]
 
                 if instances:
                     instance_count = sum(len(r["Instances"]) for r in instances)
-                    log(f"Security group {sg_name} ({sg_id}) in use by {instance_count} instance(s)")
+                    log(
+                        f"Security group {sg_name} ({sg_id}) in use by {instance_count} instance(s)"
+                    )
                 else:
                     if dry_run:
-                        log(f"[DRY RUN] Would delete unused security group: {sg_name} ({sg_id})")
+                        log(
+                            f"[DRY RUN] Would delete unused security group: {sg_name} ({sg_id})"
+                        )
                     else:
                         ec2.delete_security_group(GroupId=sg_id)
                         log(f"✓ Deleted security group: {sg_name} ({sg_id})")
@@ -794,7 +888,9 @@ def get_provider(
         load_dotenv()
         provider_name = os.getenv("DEPLOY_VM_PROVIDER", "digitalocean")
         if provider_name not in ["digitalocean", "aws"]:
-            log(f"[WARN] Invalid DEPLOY_VM_PROVIDER '{provider_name}', using 'digitalocean'")
+            log(
+                f"[WARN] Invalid DEPLOY_VM_PROVIDER '{provider_name}', using 'digitalocean'"
+            )
             provider_name = "digitalocean"
     elif provider_name not in ["digitalocean", "aws"]:
         error(f"Unknown provider: {provider_name}. Available: digitalocean, aws")

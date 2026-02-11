@@ -6,14 +6,14 @@ import subprocess
 from pathlib import Path
 from textwrap import dedent
 
-from .utils import error, get_ssh_user, get_sudo_prefix, log, warn
 from .server import (
+    rsync,
     ssh,
+    ssh_as_user,
     ssh_script,
     ssh_write_file,
-    ssh_as_user,
-    rsync,
 )
+from .utils import error, get_ssh_user, get_sudo_prefix, log
 
 
 def compute_hash(source: str, exclude: list[str] | None = None) -> str:
@@ -49,7 +49,9 @@ class BaseApp:
         self.provider_name = provider_name
         self.ssh_user = get_ssh_user(provider_name)
 
-    def compute_source_hash(self, local_path: str, exclude: list[str] | None = None) -> str:
+    def compute_source_hash(
+        self, local_path: str, exclude: list[str] | None = None
+    ) -> str:
         """Compute hash of local source directory."""
         return compute_hash(local_path, exclude)
 
@@ -67,7 +69,9 @@ class BaseApp:
                 return apps[0]
             elif len(apps) > 1:
                 app_names = ", ".join(app["name"] for app in apps)
-                error(f"Multiple {app_type} apps found: {app_names}. Use --app-name to specify.")
+                error(
+                    f"Multiple {app_type} apps found: {app_names}. Use --app-name to specify."
+                )
             else:
                 # Fallback for old single-app instances
                 return {"name": "app", "type": app_type}
@@ -217,8 +221,17 @@ class NuxtApp(BaseApp):
 
         log("Generating PM2 ecosystem config...")
         ecosystem_config = self.generate_pm2_config()
-        ssh_write_file(self.ip, f"{self.app_dir}/ecosystem.config.cjs", ecosystem_config, user=self.ssh_user)
-        ssh(self.ip, f"chown {self.user}:{self.user} {self.app_dir}/ecosystem.config.cjs", user=self.ssh_user)
+        ssh_write_file(
+            self.ip,
+            f"{self.app_dir}/ecosystem.config.cjs",
+            ecosystem_config,
+            user=self.ssh_user,
+        )
+        ssh(
+            self.ip,
+            f"chown {self.user}:{self.user} {self.app_dir}/ecosystem.config.cjs",
+            user=self.ssh_user,
+        )
 
         nuxt_exclude = [
             "node_modules",
@@ -310,7 +323,9 @@ class NuxtApp(BaseApp):
     def restart(self):
         """Restart PM2 app."""
         log(f"Restarting {self.app_name}...")
-        ssh_as_user(self.ip, self.user, f"pm2 reload {self.app_name}", ssh_user=self.ssh_user)
+        ssh_as_user(
+            self.ip, self.user, f"pm2 reload {self.app_name}", ssh_user=self.ssh_user
+        )
         log("App restarted")
 
     def status(self):
@@ -320,7 +335,10 @@ class NuxtApp(BaseApp):
     def logs(self, lines: int = 50):
         """Show PM2 logs."""
         return ssh_as_user(
-            self.ip, self.user, f"pm2 logs {self.app_name} --lines {lines} --nostream", ssh_user=self.ssh_user
+            self.ip,
+            self.user,
+            f"pm2 logs {self.app_name} --lines {lines} --nostream",
+            ssh_user=self.ssh_user,
         )
 
 
@@ -393,13 +411,23 @@ class FastAPIApp(BaseApp):
 
         if not force and local_hash == remote_hash and remote_hash:
             log("Source unchanged, restarting app...")
-            ssh_script(self.ip, f"{sudo}supervisorctl restart {self.app_name}", user=self.ssh_user)
+            ssh_script(
+                self.ip,
+                f"{sudo}supervisorctl restart {self.app_name}",
+                user=self.ssh_user,
+            )
             log("App restarted")
             return False
 
         log("Uploading...")
         exclude = [".venv", "__pycache__", ".git", "*.pyc", ".source_hash"]
-        rsync(source, self.ip, f"/home/{self.user}/{self.app_name}", exclude=exclude, user=self.ssh_user)
+        rsync(
+            source,
+            self.ip,
+            f"/home/{self.user}/{self.app_name}",
+            exclude=exclude,
+            user=self.ssh_user,
+        )
 
         log("Setting up Python environment...")
         venv_script = dedent(f"""
@@ -429,16 +457,23 @@ class FastAPIApp(BaseApp):
             stdout_logfile=/var/log/{self.app_name}/access.log
             environment=PATH="/home/{self.user}/{self.app_name}/.venv/bin:/home/{self.user}/.local/bin"
         """).strip()
-        ssh_write_file(self.ip, f"/etc/supervisor/conf.d/{self.app_name}.conf", supervisor_config, user=self.ssh_user)
+        ssh_write_file(
+            self.ip,
+            f"/etc/supervisor/conf.d/{self.app_name}.conf",
+            supervisor_config,
+            user=self.ssh_user,
+        )
 
         if self.ssh_user == "root":
-            hash_write_cmd = f'echo "{local_hash}" > /home/{self.user}/{self.app_name}/.source_hash'
+            hash_write_cmd = (
+                f'echo "{local_hash}" > /home/{self.user}/{self.app_name}/.source_hash'
+            )
         else:
             hash_write_cmd = f'echo "{local_hash}" | {sudo}tee /home/{self.user}/{self.app_name}/.source_hash > /dev/null'
 
         ssh_script(
             self.ip,
-            f'{hash_write_cmd} && '
+            f"{hash_write_cmd} && "
             f"{sudo}chown {self.user}:{self.user} /home/{self.user}/{self.app_name}/.source_hash && "
             f"{sudo}supervisorctl reread && {sudo}supervisorctl update && {sudo}supervisorctl restart {self.app_name}",
             user=self.ssh_user,

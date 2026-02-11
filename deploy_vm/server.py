@@ -3,13 +3,11 @@
 import base64
 import hashlib
 import json
-import os
 import re
 import subprocess
-import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
 from textwrap import dedent
 from typing import Literal
@@ -18,7 +16,7 @@ import dns.resolver
 from fabric import Connection
 from rich import print
 
-from .utils import error, get_ssh_user, get_sudo_prefix, log, run_cmd, run_cmd_json, warn
+from .utils import error, get_sudo_prefix, log, warn
 
 ProviderName = Literal["digitalocean", "aws"]
 
@@ -53,7 +51,9 @@ def ssh_as_user(ip: str, app_user: str, cmd: str, ssh_user: str = "root") -> str
 def ssh_write_file(ip: str, path: str, content: str, user: str = "root"):
     encoded = base64.b64encode(content.encode()).decode()
     if user != "root" and (path.startswith("/etc/") or path.startswith("/var/")):
-        ssh(ip, f"echo '{encoded}' | base64 -d | sudo tee {path} > /dev/null", user=user)
+        ssh(
+            ip, f"echo '{encoded}' | base64 -d | sudo tee {path} > /dev/null", user=user
+        )
     else:
         ssh(ip, f"echo '{encoded}' | base64 -d > {path}", user=user)
 
@@ -92,13 +92,13 @@ def rsync(
 
     if "Result too large" in result.stderr or "unexpected end of file" in result.stderr:
         log("rsync failed with large file error, falling back to tar+ssh...")
-        _rsync_tar_fallback(local, ip, remote, exclude, user, ssh_opts)
+        _rsync_tar_fallback(local, ip, remote, exclude, user)
     else:
         error(f"rsync failed: {result.stderr}")
 
 
 def _rsync_tar_fallback(
-    local: str, ip: str, remote: str, exclude: list[str], user: str, ssh_opts: str
+    local: str, ip: str, remote: str, exclude: list[str], user: str
 ):
     import tempfile
 
@@ -108,13 +108,17 @@ def _rsync_tar_fallback(
         exclude_args.extend(["--exclude", ex.lstrip("/")])
 
     with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-        tar_cmd = [
-            "tar",
-            "-czf",
-            tmp.name,
-            "-C",
-            local,
-        ] + exclude_args + ["."]
+        tar_cmd = (
+            [
+                "tar",
+                "-czf",
+                tmp.name,
+                "-C",
+                local,
+            ]
+            + exclude_args
+            + ["."]
+        )
         result = subprocess.run(tar_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             error(f"tar creation failed: {result.stderr}")
@@ -126,9 +130,12 @@ def _rsync_tar_fallback(
 
         scp_cmd = [
             "scp",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "Compression=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "Compression=yes",
             tar_path,
             f"{user}@{ip}:{remote_tar}",
         ]
@@ -176,11 +183,15 @@ def get_instance_apps(instance: dict) -> list[dict]:
     if "apps" in instance:
         return instance["apps"]
     if "app_name" in instance:
-        return [{"name": instance["app_name"], "type": instance.get("app_type", "nuxt")}]
+        return [
+            {"name": instance["app_name"], "type": instance.get("app_type", "nuxt")}
+        ]
     return []
 
 
-def add_app_to_instance(instance: dict, app_name: str, app_type: str, port: int | None = None):
+def add_app_to_instance(
+    instance: dict, app_name: str, app_type: str, port: int | None = None
+):
     """Add or update app in instance with conflict detection.
 
     :param instance: Instance data dict
@@ -205,7 +216,8 @@ def add_app_to_instance(instance: dict, app_name: str, app_type: str, port: int 
 
         if port is not None and port != old_port:
             conflicting_apps = [
-                app for app in instance["apps"]
+                app
+                for app in instance["apps"]
                 if app["name"] != app_name and app.get("port") == port
             ]
             if conflicting_apps:
@@ -222,8 +234,7 @@ def add_app_to_instance(instance: dict, app_name: str, app_type: str, port: int 
     else:
         if port is not None:
             conflicting_apps = [
-                app for app in instance["apps"]
-                if app.get("port") == port
+                app for app in instance["apps"] if app.get("port") == port
             ]
             if conflicting_apps:
                 conflict_names = ", ".join(app["name"] for app in conflicting_apps)
@@ -264,7 +275,10 @@ def check_http_status(url: str, timeout: int = 5) -> tuple[int | None, str]:
         req = urllib.request.Request(url, method="HEAD")
         with urllib.request.urlopen(req, timeout=timeout) as response:
             status_code = response.getcode()
-            return status_code, f"HTTP/{response.version} {status_code} {response.reason}"
+            return (
+                status_code,
+                f"HTTP/{response.version} {status_code} {response.reason}",
+            )
     except urllib.error.HTTPError as e:
         return e.code, f"HTTP/{e.version} {e.code} {e.reason}"
     except urllib.error.URLError as e:
@@ -394,7 +408,11 @@ def setup_server(
 
     log(f"Creating user: {user}")
 
-    auth_keys_path = "~/.ssh/authorized_keys" if ssh_user == "root" else "/home/ubuntu/.ssh/authorized_keys"
+    auth_keys_path = (
+        "~/.ssh/authorized_keys"
+        if ssh_user == "root"
+        else "/home/ubuntu/.ssh/authorized_keys"
+    )
 
     user_script = dedent(f"""
         set -e
@@ -448,7 +466,9 @@ def ensure_dns_matches(
     if current_ip == expected_ip:
         return False
 
-    warn(f"DNS mismatch: {domain} points to {current_ip or 'nothing'}, expected {expected_ip}")
+    warn(
+        f"DNS mismatch: {domain} points to {current_ip or 'nothing'}, expected {expected_ip}"
+    )
     log("Updating DNS...")
     p = get_provider(provider_name)
     p.setup_dns(domain, expected_ip)
@@ -466,7 +486,8 @@ def generate_nginx_server_block(
 
     :param static_dir: If provided, nginx serves static files and proxies non-static requests
     """
-    proxy_block = dedent("""
+    proxy_block = (
+        dedent("""
         proxy_pass http://127.0.0.1:{port};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -476,7 +497,10 @@ def generate_nginx_server_block(
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_cache_bypass $http_upgrade;
-    """).strip().format(port=port)
+    """)
+        .strip()
+        .format(port=port)
+    )
 
     if static_dir:
         location_block = dedent(f"""
@@ -516,12 +540,18 @@ def setup_nginx_ip(
     """Setup nginx for IP-only access (no SSL)."""
     ensure_web_firewall(ip, ssh_user=ssh_user)
 
-    server_block = generate_nginx_server_block("_", port, static_dir, listen="80 default_server")
+    server_block = generate_nginx_server_block(
+        "_", port, static_dir, listen="80 default_server"
+    )
 
     sudo = get_sudo_prefix(ssh_user)
     log(f"Setting up nginx for IP access on {ip}...")
-    ssh_script(ip, f"{sudo}apt-get update && {sudo}apt-get install -y nginx", user=ssh_user)
-    ssh_write_file(ip, "/etc/nginx/sites-available/default", server_block, user=ssh_user)
+    ssh_script(
+        ip, f"{sudo}apt-get update && {sudo}apt-get install -y nginx", user=ssh_user
+    )
+    ssh_write_file(
+        ip, "/etc/nginx/sites-available/default", server_block, user=ssh_user
+    )
     ssh_script(
         ip,
         f"{sudo}ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/ && {sudo}nginx -t && {sudo}systemctl reload nginx",
@@ -548,12 +578,18 @@ def setup_nginx_ssl(
     if not skip_dns:
         ensure_dns_matches(domain, ip, provider_name=provider_name)
 
-    server_block = generate_nginx_server_block(f"{domain} www.{domain}", port, static_dir)
+    server_block = generate_nginx_server_block(
+        f"{domain} www.{domain}", port, static_dir
+    )
 
     sudo = get_sudo_prefix(ssh_user)
     log("Setting up nginx...")
-    ssh_script(ip, f"{sudo}apt-get update && {sudo}apt-get install -y nginx", user=ssh_user)
-    ssh_write_file(ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user)
+    ssh_script(
+        ip, f"{sudo}apt-get update && {sudo}apt-get install -y nginx", user=ssh_user
+    )
+    ssh_write_file(
+        ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user
+    )
     ssh_script(
         ip,
         f"{sudo}ln -sf /etc/nginx/sites-available/{domain} /etc/nginx/sites-enabled/ && "
@@ -598,14 +634,12 @@ def verify_instance(
     *,
     domain: str | None = None,
     ssh_user: str = "root",
-    provider_name: ProviderName = "digitalocean",
 ):
     """Verify instance health: SSH, firewall, DNS, nginx, app.
 
     :param name: Instance name
     :param domain: Domain to check DNS for
     :param ssh_user: SSH user for connection
-    :param provider_name: Cloud provider for DNS checks
     """
     data = load_instance(name)
     ip = data["ip"]
@@ -637,7 +671,9 @@ def verify_instance(
         print(f"[FAIL] Firewall: ports {', '.join(missing)} not open")
         issues.append(f"Firewall missing ports: {', '.join(missing)}")
 
-    nginx_status = ssh(ip, "systemctl is-active nginx 2>/dev/null || echo 'inactive'", user=ssh_user).strip()
+    nginx_status = ssh(
+        ip, "systemctl is-active nginx 2>/dev/null || echo 'inactive'", user=ssh_user
+    ).strip()
     if nginx_status == "active":
         print("[OK] Nginx: running")
     else:

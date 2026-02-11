@@ -2,13 +2,13 @@
 
 from typing import Literal, TypedDict
 
-
 ProviderName = Literal["digitalocean", "aws"]
 AppType = Literal["nuxt", "fastapi"]
 
 
 class AppInfo(TypedDict, total=False):
     """Application information stored in instance."""
+
     name: str
     type: AppType
     port: int
@@ -16,6 +16,7 @@ class AppInfo(TypedDict, total=False):
 
 class InstanceData(TypedDict, total=False):
     """Instance data stored in .instance.json files."""
+
     id: str | int
     ip: str
     provider: ProviderName
@@ -28,12 +29,14 @@ class InstanceData(TypedDict, total=False):
 
 class InstanceResult(TypedDict):
     """Result from creating an instance."""
+
     id: str | int
     ip: str
 
 
 class InstanceListItem(TypedDict):
     """Instance information in list results."""
+
     name: str
     ip: str
     status: str
