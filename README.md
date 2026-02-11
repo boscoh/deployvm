@@ -16,10 +16,11 @@ Create `.env` in your project root:
 
 ```bash
 # AWS (recommended for production)
+# Includes full Bedrock access by default
 DEPLOY_VM_PROVIDER=aws
 AWS_PROFILE=default
 AWS_REGION=ap-southeast-2
-IAM_ROLE=bedrock-access  # Optional: for Bedrock/AWS service access
+# IAM role with Bedrock access is enabled by default (deploy-vm-bedrock)
 
 # Or use DigitalOcean
 DEPLOY_VM_PROVIDER=digitalocean
@@ -54,6 +55,11 @@ uv run deploy-vm nginx ssl my-server example.com you@example.com --port 8000
 - `fastapi deploy` - FastAPI apps with uvicorn + supervisord
 - `nuxt deploy` - Nuxt apps with PM2
 
+**AWS instances include:**
+- ✅ Full Bedrock access via IAM role (AmazonBedrockFullAccess policy)
+- ✅ Automatic IAM instance profile configuration
+- ✅ Access to all Bedrock foundation models and runtime APIs
+
 **FastAPI deployment requirements:**
 - Uses `uv` for Python package management
 - Expects `pyproject.toml` with project dependencies
@@ -61,20 +67,23 @@ uv run deploy-vm nginx ssl my-server example.com you@example.com --port 8000
 - App source must be a valid Python package
 
 **AWS Bedrock and IAM roles:**
-```bash
-# Deploy with Bedrock access (creates IAM role automatically)
-uv run deploy-vm fastapi deploy my-server /path/to/app \
-    --iam-role bedrock-access --no-ssl
 
-# Or set in .env:
-IAM_ROLE=bedrock-access
+AWS instances automatically get an IAM role with Bedrock access enabled by default:
+```bash
+# Deploy with default Bedrock access (automatic)
+uv run deploy-vm fastapi deploy my-server /path/to/app --no-ssl
+
+# Or use a custom IAM role name:
+uv run deploy-vm fastapi deploy my-server /path/to/app \
+    --iam-role custom-role-name --no-ssl
 ```
 
-The `--iam-role` flag (AWS only):
+The default IAM role (`deploy-vm-bedrock`):
 - Creates IAM role with EC2 trust policy
 - Attaches `AmazonBedrockFullAccess` managed policy
 - Creates and attaches instance profile
 - Enables Bedrock API access from your application
+- Use `--iam-role <name>` to customize the role name
 
 ### 3. Manage Your Deployment
 
@@ -149,6 +158,7 @@ uv run deploy-vm fastapi restart my-server --app-name api
 | **VM Sizes** | `t3.micro`, `t3.small`, `t3.medium`         | `s-1vcpu-1gb`, `s-2vcpu-2gb`, `s-4vcpu-8gb`   |
 | **DNS**     | Requires Route53 hosted zone                | Requires DigitalOcean nameservers              |
 | **Auth**    | `aws configure` or `.env` file              | `doctl auth init`                              |
+| **Bedrock** | ✅ Full access included by default          | ❌ Not available                                |
 
 See [PROVIDER_COMPARISON.md](PROVIDER_COMPARISON.md) for complete details.
 
@@ -172,7 +182,7 @@ deploy-vm nuxt deploy|sync|restart|status|logs
 - `--domain <domain>` - Domain for SSL
 - `--no-ssl` - Skip SSL configuration
 - `--app-name <name>` - App identifier (for multiple apps)
-- `--iam-role <name>` - AWS only: IAM role for Bedrock/AWS service access
+- `--iam-role <name>` - AWS only: Custom IAM role name (default: deploy-vm-bedrock with Bedrock access)
 
 See full command documentation: `deploy-vm <command> --help`
 
