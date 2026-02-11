@@ -366,11 +366,31 @@ class AWSProvider:
 
         aws_config = {}
 
+        # Get available AWS profiles from ~/.aws/credentials and ~/.aws/config
+        available_profiles = set()
+        credentials_path = os.path.expanduser("~/.aws/credentials")
+        config_path = os.path.expanduser("~/.aws/config")
+
+        if os.path.exists(credentials_path):
+            import configparser
+            config = configparser.ConfigParser()
+            config.read(credentials_path)
+            available_profiles.update(config.sections())
+
+        if os.path.exists(config_path):
+            import configparser
+            config = configparser.ConfigParser()
+            config.read(config_path)
+            for section in config.sections():
+                if section.startswith("profile "):
+                    available_profiles.add(section[8:])  # Remove 'profile ' prefix
+                elif section != "default":
+                    available_profiles.add(section)
+
         # Only add profile if it actually exists - let boto3 handle credential chain
         profile_name = os.getenv("AWS_PROFILE")
         profile_not_found = False
         if profile_name:
-            available_profiles = AWSProvider._get_available_profiles()
             if profile_name in available_profiles:
                 aws_config["profile_name"] = profile_name
             else:
@@ -399,7 +419,6 @@ class AWSProvider:
 
             if not credentials:
                 if is_raise_exception:
-                    available_profiles = AWSProvider._get_available_profiles()
                     if available_profiles:
                         error(
                             f"No AWS credentials found.\n"
@@ -597,34 +616,6 @@ class AWSProvider:
 
     def _get_iam_client(self):
         return self._get_session().client("iam")
-
-    @staticmethod
-    def _get_available_profiles() -> list[str]:
-        """Get list of available AWS profiles from ~/.aws/credentials and ~/.aws/config."""
-        profiles = set()
-
-        # Check credentials file
-        credentials_path = os.path.expanduser("~/.aws/credentials")
-        if os.path.exists(credentials_path):
-            import configparser
-            config = configparser.ConfigParser()
-            config.read(credentials_path)
-            profiles.update(config.sections())
-
-        # Check config file
-        config_path = os.path.expanduser("~/.aws/config")
-        if os.path.exists(config_path):
-            import configparser
-            config = configparser.ConfigParser()
-            config.read(config_path)
-            for section in config.sections():
-                # Remove 'profile ' prefix from config sections
-                if section.startswith("profile "):
-                    profiles.add(section[8:])
-                elif section != "default":
-                    profiles.add(section)
-
-        return sorted(profiles)
 
     def _ensure_iam_role_and_profile(self, role_name: str) -> str:
         """Ensure IAM role and instance profile exist, return instance profile name.
