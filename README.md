@@ -93,6 +93,53 @@ uv run deploy-vm nuxt deploy my-server /path/to/nuxt \
 
 Builds Nuxt app and configures nginx with SSL. Managed by PM2. Nginx serves static files from `.output/public/` and proxies API requests. SSL uses certbot (requires Route53 for AWS or DigitalOcean DNS).
 
+## Adding SSL After Deployment
+
+You can deploy without SSL first and add it later when ready:
+
+### Step 1: Deploy without SSL
+
+```bash
+# FastAPI example
+uv run deploy-vm fastapi deploy my-server /path/to/app \
+    --provider aws \
+    --no-ssl
+
+# Nuxt example
+uv run deploy-vm nuxt deploy my-server /path/to/nuxt \
+    --no-ssl
+```
+
+Your app is now accessible via `http://<ip-address>`
+
+### Step 2: Get nameservers and configure domain
+
+```bash
+# Get nameservers for your domain (creates hosted zone if needed)
+uv run deploy-vm dns nameservers example.com --provider-name aws
+
+# Configure these nameservers at your domain registrar
+# Wait 24-48 hours for DNS propagation
+```
+
+### Step 3: Add SSL certificate
+
+```bash
+# Add SSL to existing deployment
+uv run deploy-vm nginx ssl my-server example.com admin@example.com \
+    --port 8000 \
+    --provider-name aws
+```
+
+Your app is now accessible via `https://example.com`
+
+### When to use this approach:
+
+- **DNS not ready**: Nameservers haven't propagated yet
+- **Testing first**: Want to verify app works before adding SSL
+- **Iterative setup**: Prefer step-by-step infrastructure configuration
+- **Domain issues**: Still configuring domain settings
+
 ## Commands
 
 ```
@@ -114,6 +161,11 @@ deploy-vm --help
   - `apps` - List all apps deployed on an instance
   - `verify` - Verify server health (SSH, firewall, nginx, DNS)
     - Use `--domain` to check DNS and HTTPS
+- `deploy-vm dns`
+  - `nameservers` - Get nameservers for a domain (creates hosted zone if needed for AWS)
+    - AWS: Shows Route53 nameservers and zone details
+    - DigitalOcean: Shows standard DigitalOcean nameservers
+    - Caches result in `<domain>.nameservers.json` for faster subsequent lookups
 - `deploy-vm nginx`
   - `ip` - Setup nginx for IP-only access
   - `ssl` - Setup nginx with SSL certificate
