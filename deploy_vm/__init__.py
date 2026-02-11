@@ -8,6 +8,7 @@ from .providers import (
     PROVIDER_OPTIONS,
     get_provider,
 )
+from .cli import app
 
 __all__ = [
     "AWSProvider",
@@ -16,4 +17,5 @@ __all__ = [
     "ProviderName",
     "PROVIDER_OPTIONS",
     "get_provider",
+    "app",
 ]
