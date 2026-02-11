@@ -12,11 +12,31 @@ uv tool install deploy-vm
 
 See [Requirements](#requirements) for prerequisites.
 
+## Configuration
+
+### Environment Variables (.env)
+
+Create a `.env` file in your project root to set default configuration:
+
+```bash
+# Cloud Provider (optional)
+DEPLOY_VM_PROVIDER=aws              # or "digitalocean" (default)
+
+# AWS Configuration (optional)
+AWS_PROFILE=your-profile            # AWS CLI profile name
+AWS_REGION=ap-southeast-2           # Default AWS region
+```
+
+**Benefits:**
+- Set provider once, no need for `--provider aws` on every command
+- Use AWS CLI profiles for multiple accounts
+- Override defaults with command-line flags when needed
+
+**Note:** The `.env` file is loaded automatically. Command-line arguments always take precedence over environment variables.
+
 ## Quick Start
 
 This guide walks you through three main tasks: creating a cloud instance, deploying a FastAPI application, and deploying a Nuxt application.
-
-**Tip:** Set `DEPLOY_VM_PROVIDER=aws` in `.env` to use AWS by default without `--provider aws` on every command.
 
 ### Task 1: Create a Cloud Instance
 
@@ -147,22 +167,52 @@ Note: While Fabric (Python library) uses Paramiko for SSH connections, `rsync` a
 
 #### AWS
 
-1. Configure AWS credentials:
+1. **Configure AWS credentials** (choose one method):
+
+   **Option A: AWS CLI**
    ```bash
    aws configure
-   # Or set environment variables:
+   # Prompts for: Access Key ID, Secret Access Key, Region, Output format
+   ```
+
+   **Option B: Environment variables**
+   ```bash
+   # For temporary use (session only)
    export AWS_PROFILE=your-profile
    export AWS_REGION=ap-southeast-2
+
+   # For persistent use, add to .env file:
+   echo "AWS_PROFILE=your-profile" >> .env
+   echo "AWS_REGION=ap-southeast-2" >> .env
    ```
-2. Set default provider (optional):
+
+   **Option C: Multiple profiles**
+   ```bash
+   # Edit ~/.aws/credentials
+   [default]
+   aws_access_key_id = YOUR_KEY
+   aws_secret_access_key = YOUR_SECRET
+
+   [work]
+   aws_access_key_id = WORK_KEY
+   aws_secret_access_key = WORK_SECRET
+
+   # Use in .env
+   echo "AWS_PROFILE=work" >> .env
+   ```
+
+2. **Set default provider** (optional but recommended):
    ```bash
    # Add to .env file in project root
-   DEPLOY_VM_PROVIDER=aws
+   echo "DEPLOY_VM_PROVIDER=aws" >> .env
    ```
    This allows you to omit `--provider aws` from all commands.
-3. SSH key in `~/.ssh/` (id_ed25519, id_rsa, or id_ecdsa)
-4. SSH key uploaded to AWS (auto-uploaded on first deploy)
-5. Credentials stored in `~/.aws/credentials`
+
+3. **SSH key setup**:
+   - SSH key in `~/.ssh/` (id_ed25519, id_rsa, or id_ecdsa)
+   - Automatically uploaded to AWS on first deploy
+
+4. **Credentials file**: `~/.aws/credentials` stores your access keys
 
 ### Domain Setup
 
@@ -215,4 +265,33 @@ The `apps` array tracks all apps deployed on the instance. Each app entry includ
 - Automatically use the app if only one exists
 - Require `--app-name` if multiple apps exist
 - Use `deploy-vm instance apps <name>` to list all apps on an instance
+
+## Environment Variables Reference
+
+Deploy-vm reads configuration from a `.env` file in your project root (if it exists):
+
+| Variable | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `DEPLOY_VM_PROVIDER` | Default cloud provider | `aws` or `digitalocean` | `digitalocean` |
+| `AWS_PROFILE` | AWS CLI profile name | `default`, `production`, `staging` | None |
+| `AWS_REGION` | Default AWS region | `ap-southeast-2`, `us-east-1` | `ap-southeast-2` |
+
+**Example `.env` file:**
+```bash
+# Use AWS by default
+DEPLOY_VM_PROVIDER=aws
+
+# Use specific AWS profile
+AWS_PROFILE=production
+
+# Default to Sydney region
+AWS_REGION=ap-southeast-2
+```
+
+**Priority order** (highest to lowest):
+1. Command-line flags (e.g., `--provider aws`)
+2. Environment variables in `.env` file
+3. Built-in defaults
+
+**Note:** The `.env` file is gitignored by default to prevent accidentally committing credentials.
 
