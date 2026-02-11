@@ -18,6 +18,8 @@ import dns.resolver
 from fabric import Connection
 from rich import print
 
+from .utils import error, get_ssh_user, log, run_cmd, run_cmd_json, warn
+
 ProviderName = Literal["digitalocean", "aws"]
 
 SSH_TIMEOUT = 120
@@ -25,40 +27,6 @@ HTTP_VERIFY_RETRIES = 6
 HTTP_VERIFY_DELAY = 5
 DNS_VERIFY_RETRIES = 30
 DNS_VERIFY_DELAY = 10
-
-
-def log(msg: str):
-    print(f"[green][INFO][/green] {msg}")
-
-
-def warn(msg: str):
-    print(f"[yellow][WARN][/yellow] {msg}")
-
-
-def error(msg: str):
-    print(f"[red][ERROR][/red] {msg}")
-    sys.exit(1)
-
-
-def get_ssh_user(provider_name: str) -> str:
-    """Get default SSH user for cloud provider.
-
-    :param provider_name: Cloud provider (aws or digitalocean)
-    :return: SSH username (ubuntu for AWS, root for DigitalOcean)
-    """
-    return "ubuntu" if provider_name == "aws" else "root"
-
-
-def run_cmd(*args, check: bool = True) -> str:
-    result = subprocess.run(args, capture_output=True, text=True)
-    if check and result.returncode != 0:
-        error(f"Command failed: {result.stderr}")
-    return result.stdout.strip()
-
-
-def run_cmd_json(*args) -> dict | list:
-    output = run_cmd(*args, "-o", "json")
-    return json.loads(output) if output else []
 
 
 def ssh(ip: str, cmd: str, user: str = "root") -> str:

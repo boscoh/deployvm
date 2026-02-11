@@ -12,6 +12,8 @@ import boto3
 from botocore.exceptions import ClientError, ProfileNotFound
 from dotenv import load_dotenv
 
+from .utils import error, log, run_cmd, run_cmd_json, warn
+
 ProviderName = Literal["digitalocean", "aws"]
 
 PROVIDER_OPTIONS = {
@@ -34,34 +36,9 @@ PROVIDER_OPTIONS = {
 }
 
 
-def log(msg: str):
-    from rich import print
-    print(f"[green][INFO][/green] {msg}")
 
 
-def warn(msg: str):
-    from rich import print
-    print(f"[yellow][WARN][/yellow] {msg}")
 
-
-def error(msg: str):
-    from rich import print
-    import sys
-    print(f"[red][ERROR][/red] {msg}")
-    sys.exit(1)
-
-
-def run_cmd(*args, check: bool = True) -> str:
-    result = subprocess.run(args, capture_output=True, text=True)
-    if check and result.returncode != 0:
-        error(f"Command failed: {result.stderr}")
-    return result.stdout.strip()
-
-
-def run_cmd_json(*args) -> dict | list:
-    import json
-    output = run_cmd(*args, "-o", "json")
-    return json.loads(output) if output else []
 
 
 def get_local_ssh_key() -> tuple[str, str]:

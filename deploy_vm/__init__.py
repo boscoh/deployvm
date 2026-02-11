@@ -9,6 +9,7 @@ from .providers import (
     get_provider,
 )
 from .cli import app
+from .utils import error, get_ssh_user, log, run_cmd, run_cmd_json, warn
 
 __all__ = [
     "AWSProvider",
@@ -18,4 +19,10 @@ __all__ = [
     "PROVIDER_OPTIONS",
     "get_provider",
     "app",
+    "log",
+    "warn",
+    "error",
+    "get_ssh_user",
+    "run_cmd",
+    "run_cmd_json",
 ]
