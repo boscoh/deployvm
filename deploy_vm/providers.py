@@ -574,6 +574,28 @@ class AWSProvider:
         )
         return images[0]["ImageId"]
 
+    def _ensure_ssh_key(self, ec2) -> str:
+        """Ensure SSH key exists in AWS, upload if needed.
+
+        :param ec2: EC2 client
+        :return: SSH key name
+        """
+        key_content, fingerprint = get_local_ssh_key()
+        key_name = f"deploy-vm-{fingerprint[-8:]}"
+
+        try:
+            ec2.describe_key_pairs(KeyNames=[key_name])
+            log(f"Using existing SSH key: {key_name}")
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "InvalidKeyPair.NotFound":
+                log("Uploading SSH key to AWS...")
+                ec2.import_key_pair(KeyName=key_name, PublicKeyMaterial=key_content)
+                log(f"Uploaded SSH key: {key_name}")
+            else:
+                raise
+
+        return key_name
+
     def _get_session(self):
         """Get boto3 session using aws_config."""
         return boto3.Session(**self.aws_config)
@@ -725,19 +747,7 @@ class AWSProvider:
         if iam_role:
             instance_profile_name = self._ensure_iam_role_and_profile(iam_role)
 
-        key_content, fingerprint = get_local_ssh_key()
-        key_name = f"deploy-vm-{fingerprint[-8:]}"
-
-        try:
-            ec2.describe_key_pairs(KeyNames=[key_name])
-            log(f"Using existing SSH key: {key_name}")
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "InvalidKeyPair.NotFound":
-                log("Uploading SSH key to AWS...")
-                ec2.import_key_pair(KeyName=key_name, PublicKeyMaterial=key_content)
-                log(f"Uploaded SSH key: {key_name}")
-            else:
-                raise
+        key_name = self._ensure_ssh_key(ec2)
 
         sg_name = "deploy-vm-web"
         try:
