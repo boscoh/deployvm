@@ -1,6 +1,8 @@
 # deploy-vm
 
-A minimalist Python CLI for deploying web apps to the cloud (DigitalOcean for now). No Kubernetes, no Docker, no load balancers — just a bare Linux VM behind nginx. 
+Python CLI for deploying web applications to cloud providers (DigitalOcean and AWS).
+
+**Important**: DigitalOcean and AWS use different parameter formats. See [PROVIDER_COMPARISON.md](PROVIDER_COMPARISON.md) for detailed differences in regions, VM sizes, and OS images.
 
 ## Installation
 
@@ -14,12 +16,18 @@ See [Requirements](#requirements) for prerequisites.
 
 This guide walks you through three main tasks: creating a cloud instance, deploying a FastAPI application, and deploying a Nuxt application.
 
+**Tip:** Set `DEPLOY_VM_PROVIDER=aws` in `.env` to use AWS by default without `--provider aws` on every command.
+
 ### Task 1: Create a Cloud Instance
 
-Create a new cloud instance on DigitalOcean:
+Create a new cloud instance on DigitalOcean or AWS:
 
 ```bash
-deploy-vm instance create my-server
+# DigitalOcean (default)
+uv run deploy-vm instance create my-server
+
+# AWS
+uv run deploy-vm instance create my-server --provider aws
 ```
 
 Instance details saved to `my-server.instance.json`. You can now SSH to the instance with passwordless SSH:
@@ -34,25 +42,36 @@ ssh deploy@<ip>
 Deploy a FastAPI application with nginx as a reverse proxy in front of it:
 
 ```bash
-# IP-only access (no SSL)
-deploy-vm fastapi deploy my-server /path/to/app --no-ssl
+# DigitalOcean - IP-only access (no SSL)
+uv run deploy-vm fastapi deploy my-server /path/to/app --no-ssl
 
-# With SSL certificate
-deploy-vm fastapi deploy my-server /path/to/app \
+# DigitalOcean - With SSL certificate
+uv run deploy-vm fastapi deploy my-server /path/to/app \
+    --domain example.com --email you@example.com
+
+# AWS - With SSL certificate
+uv run deploy-vm fastapi deploy my-server /path/to/app \
+    --provider aws --vm-size t3.small \
     --domain example.com --email you@example.com
 ```
 
-Configures nginx as reverse proxy to FastAPI (port 8000), managed by supervisord. SSL uses certbot (requires DigitalOcean nameservers).
+Configures nginx as reverse proxy to FastAPI (port 8000), managed by supervisord. SSL uses certbot (requires Route53 for AWS or DigitalOcean DNS).
 
 ### Task 3: Deploy a Nuxt Application
 
 Deploy a Nuxt application with SSL:
 
 ```bash
-deploy-vm nuxt deploy my-server example.com /path/to/nuxt you@example.com
+# DigitalOcean
+uv run deploy-vm nuxt deploy my-server example.com /path/to/nuxt you@example.com
+
+# AWS
+uv run deploy-vm nuxt deploy my-server /path/to/nuxt \
+    --provider aws --region us-west-2 --vm-size t3.medium \
+    --domain example.com --email you@example.com
 ```
 
-Builds Nuxt app and configures nginx with SSL. Managed by PM2. Nginx serves static files from `.output/public/` and proxies API requests. SSL uses certbot (requires DigitalOcean nameservers).
+Builds Nuxt app and configures nginx with SSL. Managed by PM2. Nginx serves static files from `.output/public/` and proxies API requests. SSL uses certbot (requires Route53 for AWS or DigitalOcean DNS).
 
 ## Commands
 
@@ -62,9 +81,14 @@ deploy-vm --help
 
 - `deploy-vm instance`
   - `create` - Create a new cloud instance
-    - Regions: syd1, sgp1, nyc1, sfo3, lon1, fra1
-    - VM sizes: s-1vcpu-512mb* (nyc1, fra1, sfo3, sgp1, ams3 only), s-1vcpu-1gb, s-1vcpu-2gb, s-2vcpu-2gb, s-4vcpu-8gb
-    - OS: ubuntu-24-04-x64, ubuntu-22-04-x64
+    - `--provider digitalocean` (default)
+      - `--region`: syd1 (default), sgp1, nyc1, sfo3, lon1, fra1
+      - `--vm-size`: s-1vcpu-1gb (default), s-1vcpu-512mb* (nyc1, fra1, sfo3, sgp1, ams3 only), s-1vcpu-2gb, s-2vcpu-2gb, s-4vcpu-8gb
+      - `--os-image`: ubuntu-24-04-x64 (default), ubuntu-22-04-x64
+    - `--provider aws`
+      - `--region`: ap-southeast-2 (default), us-east-1, us-west-2, eu-west-1, ap-southeast-1
+      - `--vm-size`: t3.micro (default), t3.small, t3.medium, t3.large, t3.xlarge, t4g.micro, t4g.small
+      - `--os-image`: Latest Ubuntu 22.04 LTS AMI (auto-selected)
   - `delete` - Delete an instance (use `--force` to skip confirmation)
   - `list` - List all instances
   - `apps` - List all apps deployed on an instance
@@ -103,7 +127,8 @@ deploy-vm --help
 | Tool  | Purpose                        | Install                                             |
 |-------|--------------------------------|-----------------------------------------------------|
 | uv    | Python package manager         | `curl -LsSf https://astral.sh/uv/install.sh \| sh`  |
-| doctl | DigitalOcean CLI               | `brew install doctl`                                |
+| doctl | DigitalOcean CLI (optional)    | `brew install doctl`                                |
+| aws   | AWS CLI (optional)             | `brew install awscli`                               |
 | rsync | File sync to server            | `brew install rsync`                                |
 | tar   | Archive creation (fallback)    | Pre-installed on macOS/Linux                        |
 | scp   | Secure file copy (fallback)    | Pre-installed on macOS/Linux (part of OpenSSH)      |
@@ -114,11 +139,34 @@ Note: While Fabric (Python library) uses Paramiko for SSH connections, `rsync` a
 
 ### Setup
 
+#### DigitalOcean
+
 1. Authenticate doctl: `doctl auth init`
 2. SSH key in `~/.ssh/` (id_ed25519, id_rsa, or id_ecdsa)
 3. SSH key uploaded to DigitalOcean (auto-uploaded on first deploy)
 
+#### AWS
+
+1. Configure AWS credentials:
+   ```bash
+   aws configure
+   # Or set environment variables:
+   export AWS_PROFILE=your-profile
+   export AWS_REGION=ap-southeast-2
+   ```
+2. Set default provider (optional):
+   ```bash
+   # Add to .env file in project root
+   DEPLOY_VM_PROVIDER=aws
+   ```
+   This allows you to omit `--provider aws` from all commands.
+3. SSH key in `~/.ssh/` (id_ed25519, id_rsa, or id_ecdsa)
+4. SSH key uploaded to AWS (auto-uploaded on first deploy)
+5. Credentials stored in `~/.aws/credentials`
+
 ### Domain Setup
+
+#### DigitalOcean
 
 Configure your domain registrar to use DigitalOcean's nameservers:
 
@@ -129,6 +177,14 @@ ns3.digitalocean.com
 ```
 
 Nameserver changes can take up to 48 hours to propagate.
+
+#### AWS
+
+Configure Route53 hosted zone for your domain:
+
+1. Create a hosted zone in Route53 for your domain
+2. Update your domain registrar to use AWS Route53 nameservers
+3. The tool will automatically update A records in the hosted zone
 
 ## Instance State
 
