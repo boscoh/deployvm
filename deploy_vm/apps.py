@@ -60,6 +60,8 @@ def filter_aws_credentials_from_env(
     if provider_name != "aws" or not env_path.exists():
         return False
 
+    log("Filtering AWS credentials from .env (EC2 instances use IAM roles)")
+
     lines = env_path.read_text().splitlines()
     aws_vars = ["AWS_PROFILE=", "AWS_ACCESS_KEY_ID=", "AWS_SECRET_ACCESS_KEY="]
 
@@ -76,7 +78,9 @@ def filter_aws_credentials_from_env(
             filtered_lines.append(line)
 
     if filtered_vars:
-        log(f"Filtered AWS credentials from .env: {', '.join(filtered_vars)}")
+        log(f"  Removed: {', '.join(filtered_vars)}")
+    else:
+        log("  No AWS credentials found in .env")
 
     # Create temp filtered .env file
     import tempfile
