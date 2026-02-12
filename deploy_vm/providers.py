@@ -496,7 +496,13 @@ class AWSProvider:
     def _validate_vpc(self, ec2, vpc_id: str) -> tuple[bool, str | None]:
         """Validate VPC has required components (subnets, IGW, route table).
 
-        :return: (is_valid, error_message)
+        Checks that the specified VPC has all necessary components for hosting
+        EC2 instances with public internet access: subnets, an attached internet
+        gateway, and at least one public subnet with a route to the IGW.
+
+        :param ec2: Boto3 EC2 client instance
+        :param vpc_id: VPC ID to validate
+        :return: Tuple of (is_valid, error_message). error_message is None if valid
         """
         subnets = ec2.describe_subnets(
             Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
@@ -545,6 +551,13 @@ class AWSProvider:
         return True, None
 
     def _get_my_ip(self) -> str:
+        """Get the current public IP address for SSH restriction.
+
+        Queries an external service to determine the public IP address of the
+        current machine. Falls back to None if the service is unreachable.
+
+        :return: Public IP address string, or None if detection fails
+        """
         try:
             import urllib.request
 
@@ -577,8 +590,11 @@ class AWSProvider:
     def _ensure_ssh_key(self, ec2) -> str:
         """Ensure SSH key exists in AWS, upload if needed.
 
-        :param ec2: EC2 client
-        :return: SSH key name
+        Checks if a local SSH key is already registered with AWS EC2. If not found,
+        uploads the local public key to AWS for use with new instances.
+
+        :param ec2: Boto3 EC2 client instance
+        :return: SSH key name registered in AWS
         """
         key_content, fingerprint = get_local_ssh_key()
         key_name = f"deploy-vm-{fingerprint[-8:]}"
@@ -599,7 +615,11 @@ class AWSProvider:
     def _ensure_security_group(self, ec2) -> str:
         """Ensure security group exists in AWS, create if needed.
 
-        :param ec2: EC2 client
+        Checks for the 'deploy-vm-web' security group. If not found, creates a new
+        security group with rules allowing SSH (port 22), HTTP (port 80), and HTTPS
+        (port 443) access. SSH access is restricted to the current public IP when possible.
+
+        :param ec2: Boto3 EC2 client instance
         :return: Security group ID
         """
         sg_name = "deploy-vm-web"
@@ -716,11 +736,13 @@ class AWSProvider:
     def _ensure_iam_role_and_profile(self, role_name: str) -> str:
         """Ensure IAM role and instance profile exist with Bedrock access.
 
-        Creates IAM role with EC2 trust policy, attaches AmazonBedrockFullAccess,
-        creates instance profile, and adds role to profile.
+        Creates or retrieves an IAM role with EC2 trust policy, attaches the
+        AmazonBedrockFullAccess managed policy, creates an instance profile with
+        the same name, and associates the role with the profile. Waits for the
+        profile to be fully propagated before returning.
 
-        :param role_name: Name for both IAM role and instance profile
-        :return: Instance profile name
+        :param role_name: Name for both the IAM role and instance profile
+        :return: Instance profile name (same as role_name)
         """
         iam = self._get_iam_client()
 
