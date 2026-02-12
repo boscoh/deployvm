@@ -10,80 +10,48 @@ uv tool install deploy-vm
 
 ## Quick Start
 
-### 1. Configure Provider (Optional)
+### 1. Configure Provider
 
-Create `.env` in your project root:
+Create `.env` in your **project root** (optional - defaults to DigitalOcean):
 
 ```bash
 # AWS (recommended for production)
-# Includes full Bedrock access by default
 DEPLOY_VM_PROVIDER=aws
 AWS_PROFILE=default
 AWS_REGION=ap-southeast-2
-# IAM role with Bedrock access is enabled by default (deploy-vm-bedrock)
 
-# Or use DigitalOcean
+# Or use DigitalOcean (default)
 DEPLOY_VM_PROVIDER=digitalocean
 ```
 
+> **Note**: This configures `deploy-vm` itself. Your **application credentials** go in a separate `.env` inside your app directory (see [Application Credentials](#application-credentials-env)).
+
 **Setup requirements:**
-- **AWS**: Run `aws configure` to set credentials ([AWS setup guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html))
-- **DigitalOcean**: Run `doctl auth init` to authenticate
+- **AWS**: Run `aws configure` ([setup guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html))
+- **DigitalOcean**: Run `doctl auth init`
 
 ### 2. Deploy Your App
 
-**With domain + SSL (recommended):**
+**Simple deployment (no SSL):**
 ```bash
-# Get nameservers and configure at registrar first
+uv run deploy-vm fastapi deploy my-server /path/to/app --no-ssl
+```
+
+**With domain + SSL:**
+```bash
+# 1. Get nameservers first (see Domain Setup section for details)
 uv run deploy-vm dns nameservers example.com --provider aws
 
-# Deploy with SSL (creates instance, deploys app, configures SSL)
+# 2. Configure at registrar, wait 24-48h for propagation
+
+# 3. Deploy with SSL
 uv run deploy-vm fastapi deploy my-server /path/to/app \
     --domain example.com --email you@example.com
 ```
 
-**Without SSL (test/staging):**
-```bash
-# Deploy to IP only
-uv run deploy-vm fastapi deploy my-server /path/to/app --no-ssl
-
-# Add SSL later when domain is ready
-uv run deploy-vm nginx ssl my-server example.com you@example.com --port 8000
-```
-
-**Supported apps:**
+**Supported app types:**
 - `fastapi deploy` - FastAPI apps with uvicorn + supervisord
 - `nuxt deploy` - Nuxt apps with PM2
-
-**AWS instances include:**
-- ✅ Full Bedrock access via IAM role (AmazonBedrockFullAccess policy)
-- ✅ Automatic IAM instance profile configuration
-- ✅ Access to all Bedrock foundation models and runtime APIs
-
-**FastAPI deployment requirements:**
-- Uses `uv` for Python package management
-- Expects `pyproject.toml` with project dependencies
-- Runs via `uvicorn` with supervisord for process management
-- App source must be a valid Python package
-
-**AWS Bedrock and IAM roles:**
-
-AWS instances automatically get an IAM role with Bedrock access enabled by default:
-```bash
-# Deploy with default Bedrock access (automatic)
-uv run deploy-vm fastapi deploy my-server /path/to/app --no-ssl
-
-# Or use a custom IAM role name:
-uv run deploy-vm fastapi deploy my-server /path/to/app \
-    --iam-role custom-role-name --no-ssl
-```
-
-The default IAM role (`deploy-vm-bedrock`):
-- Creates IAM role with EC2 trust policy
-- Attaches `AmazonBedrockFullAccess` managed policy
-- Creates and attaches instance profile
-- Enables Bedrock API access from your application
-- Use `--iam-role <name>` to customize the role name
 
 ### 3. Manage Your Deployment
 
@@ -105,22 +73,20 @@ uv run deploy-vm fastapi sync my-server /path/to/app
 
 ### Add SSL After Deployment
 
-Deploy without SSL first, add it when ready:
+Deploy first, add SSL when domain is ready:
 
 ```bash
-# 1. Deploy
+# 1. Deploy without SSL
 uv run deploy-vm fastapi deploy my-server /path/to/app --no-ssl
 
-# 2. Get nameservers (creates hosted zone automatically)
+# 2. Configure domain (see Domain Setup section)
 uv run deploy-vm dns nameservers example.com --provider aws
 
-# 3. Configure nameservers at registrar, wait 24-48h
+# 3. Update nameservers at registrar, wait 24-48h
 
 # 4. Add SSL
 uv run deploy-vm nginx ssl my-server example.com you@example.com --port 8000
 ```
-
-**Note:** See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for detailed usage patterns and troubleshooting.
 
 ### Multiple Apps on One Instance
 
@@ -144,6 +110,8 @@ uv run deploy-vm fastapi restart my-server --app-name api
 
 ### Environment Variables
 
+**Deploy-VM Configuration** (`.env` in project root):
+
 | Variable               | Description                              | Default          |
 |------------------------|------------------------------------------|------------------|
 | `DEPLOY_VM_PROVIDER`   | Cloud provider (`aws` or `digitalocean`) | `digitalocean`   |
@@ -154,49 +122,86 @@ uv run deploy-vm fastapi restart my-server --app-name api
 
 ### Application Credentials (.env)
 
-Apps deployed with `deploy-vm` use a `.env` file in the app directory to store credentials and configuration:
+> **Important**: This is a **different `.env` file** than the deploy-vm configuration above.
 
-- **Location**: `.env` in your app's root directory (e.g., `/path/to/app/.env`)
-- **Purpose**: Stores API keys, secrets, and other credentials needed for your app to work
-- **Deployment**: Automatically uploaded during `deploy` or `sync` operations
+Your deployed apps use a `.env` file **inside the app directory** for credentials:
 
-**AWS credential handling:**
+- **Location**: `.env` in your app's root (e.g., `/path/to/app/.env`)
+- **Purpose**: API keys, database URLs, secrets your app needs to run
+- **Deployment**: Automatically uploaded during `deploy` or `sync`
 
-When deploying to AWS EC2, there is special logic for AWS credentials:
+**AWS credential filtering:**
 
-- **`AWS_PROFILE`**: Automatically removed (EC2 instances use IAM roles instead)
-- **`AWS_ACCESS_KEY_ID`** and **`AWS_SECRET_ACCESS_KEY`**: Automatically removed
-- **`AWS_REGION`**: Preserved if present, or auto-added from your AWS profile configuration
-  - Required for Bedrock and other AWS services
-  - Automatically extracted from your local AWS profile when `AWS_PROFILE` is removed
+When deploying to AWS EC2, credentials are automatically filtered:
+- ❌ **Removed**: `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (EC2 uses IAM roles)
+- ✅ **Preserved/Added**: `AWS_REGION` (required for Bedrock and other services)
 
-**Example `.env` in your app directory:**
+**Example app `.env`:**
 ```bash
 # API credentials
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-proj-...
 
-# AWS region (automatically added if missing when deploying to AWS)
+# AWS region (auto-added if missing when deploying to AWS)
 AWS_REGION=ap-southeast-2
 
-# Other app config
+# Other config
 DATABASE_URL=postgresql://...
 SECRET_KEY=your-secret-key
 ```
 
-**Note:** The filtered `.env` (without AWS credentials) is uploaded to your EC2 instance, ensuring secure credential management.
-
 ### Provider-Specific Settings
 
-| Setting    | AWS                                          | DigitalOcean                                    |
-|------------|----------------------------------------------|-------------------------------------------------|
-| **Regions** | `us-east-1`, `us-west-2`, `ap-southeast-2`  | `syd1`, `sgp1`, `nyc1`, `sfo3`, `lon1`         |
+| Setting      | AWS                                          | DigitalOcean                                    |
+|--------------|----------------------------------------------|-------------------------------------------------|
+| **Regions**  | `us-east-1`, `us-west-2`, `ap-southeast-2`  | `syd1`, `sgp1`, `nyc1`, `sfo3`, `lon1`         |
 | **VM Sizes** | `t3.micro`, `t3.small`, `t3.medium`         | `s-1vcpu-1gb`, `s-2vcpu-2gb`, `s-4vcpu-8gb`   |
-| **DNS**     | Requires Route53 hosted zone                | Requires DigitalOcean nameservers              |
-| **Auth**    | `aws configure` or `.env` file              | `doctl auth init`                              |
-| **Bedrock** | ✅ Full access included by default          | ❌ Not available                                |
+| **DNS**      | Route53 hosted zone (auto-created)          | DigitalOcean nameservers required              |
+| **Auth**     | `aws configure`                             | `doctl auth init`                              |
 
 See [PROVIDER_COMPARISON.md](PROVIDER_COMPARISON.md) for complete details.
+
+## AWS-Specific Features
+
+### Bedrock Access
+
+AWS EC2 instances automatically get **full Bedrock access** via IAM roles:
+
+**Default behavior:**
+```bash
+# Bedrock access included automatically
+uv run deploy-vm fastapi deploy my-server /path/to/app --no-ssl
+```
+
+**Custom IAM role:**
+```bash
+# Use custom role name
+uv run deploy-vm fastapi deploy my-server /path/to/app \
+    --iam-role custom-role-name --no-ssl
+```
+
+**What's included:**
+- IAM role with EC2 trust policy
+- `AmazonBedrockFullAccess` managed policy attached
+- Instance profile created and attached
+- Access to all Bedrock foundation models and runtime APIs
+
+**Configuration:**
+- Default role name: `deploy-vm-bedrock`
+- Customize with `--iam-role <name>` flag
+- Your app must include `AWS_REGION` in `.env` (auto-added if missing)
+
+### IAM Role Details
+
+The IAM setup enables your application to call Bedrock APIs without hardcoded credentials:
+
+```python
+# Your app code (no credentials needed)
+import boto3
+
+bedrock = boto3.client('bedrock-runtime', region_name=os.getenv('AWS_REGION'))
+response = bedrock.invoke_model(...)
+```
 
 ## Commands Reference
 
@@ -211,26 +216,50 @@ deploy-vm fastapi deploy|sync|restart|status|logs
 deploy-vm nuxt deploy|sync|restart|status|logs
 ```
 
-**Key options:**
+**Common options:**
 - `--provider aws|digitalocean` - Cloud provider
 - `--region <region>` - Provider region
 - `--vm-size <size>` - Instance size
 - `--domain <domain>` - Domain for SSL
 - `--no-ssl` - Skip SSL configuration
 - `--app-name <name>` - App identifier (for multiple apps)
-- `--iam-role <name>` - AWS only: Custom IAM role name (default: deploy-vm-bedrock with Bedrock access)
+- `--iam-role <name>` - AWS only: Custom IAM role name
 
-See full command documentation: `deploy-vm <command> --help`
+See full documentation: `deploy-vm <command> --help`
 
-## Domain Setup
+## Domain & SSL Setup
 
-See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for complete domain and SSL configuration guide including prerequisites, troubleshooting, and technical reference.
+### Prerequisites
 
-**Quick reference:**
-- **AWS Route53**: `uv run deploy-vm dns nameservers example.com --provider aws` (creates hosted zone automatically)
-- **DigitalOcean**: Configure ns1/2/3.digitalocean.com at your domain registrar
+**AWS Route53:**
+```bash
+# Creates hosted zone automatically
+uv run deploy-vm dns nameservers example.com --provider aws
+```
 
-After configuring nameservers, wait 24-48 hours for DNS propagation before deploying with `--domain`.
+**DigitalOcean:**
+- Configure `ns1.digitalocean.com`, `ns2.digitalocean.com`, `ns3.digitalocean.com` at your registrar
+
+### Deployment Paths
+
+**Path A - SSL from start:**
+1. Get nameservers: `uv run deploy-vm dns nameservers example.com --provider aws`
+2. Configure at registrar, wait 24-48h
+3. Deploy with `--domain example.com --email you@example.com`
+
+**Path B - Add SSL later:**
+1. Deploy with `--no-ssl`
+2. Get nameservers (creates hosted zone automatically)
+3. Configure at registrar, wait 24-48h
+4. Add SSL: `uv run deploy-vm nginx ssl my-server example.com you@example.com --port 8000`
+
+### Troubleshooting
+
+See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for:
+- Detailed setup instructions
+- DNS propagation checking
+- Common issues and solutions
+- Technical reference
 
 ## Requirements
 
@@ -260,21 +289,30 @@ brew install doctl
 doctl auth init
 ```
 
+### FastAPI Deployment Requirements
+
+- Uses `uv` for Python package management
+- Expects `pyproject.toml` with project dependencies
+- Runs via `uvicorn` with supervisord for process management
+- App source must be a valid Python package
+
 ### SSH Key
 
 Tool automatically uploads your SSH key (`~/.ssh/id_ed25519.pub`, `id_rsa.pub`, or `id_ecdsa.pub`) to the provider on first use.
 
-### Server Access
+### Server User Management
 
-All server operations use the `deploy` user by default after initial setup:
+All server operations use the `deploy` user:
 
-1. **Initial creation**: Connects as cloud default user (`root` for DigitalOcean, `ubuntu` for AWS)
-2. **Setup**: Creates `deploy` user with passwordless sudo privileges
-3. **All subsequent operations**: Use `deploy` user with `sudo` for privileged commands
+1. **Initial creation**: Connects as cloud default (`root` for DigitalOcean, `ubuntu` for AWS)
+2. **Setup**: Creates `deploy` user with passwordless sudo
+3. **All operations**: Use `deploy` user with `sudo` for privileged commands
 
-This follows security best practices by avoiding direct root access while maintaining full control. You can override the SSH user with `--ssh-user` flag if needed.
+Override with `--ssh-user` flag if needed.
 
-## Instance State
+## Advanced Topics
+
+### Instance State
 
 Instance metadata stored in `<name>.instance.json`:
 
@@ -287,7 +325,7 @@ Instance metadata stored in `<name>.instance.json`:
   "os_image": "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*",
   "vm_size": "t3.small",
   "user": "deploy",
-  "iam_role": "bedrock-access",
+  "iam_role": "deploy-vm-bedrock",
   "apps": [
     {"name": "api", "type": "fastapi", "port": 8000},
     {"name": "frontend", "type": "nuxt", "port": 3000}
@@ -297,14 +335,14 @@ Instance metadata stored in `<name>.instance.json`:
 
 DNS nameservers cached in `<domain>.nameservers.json` (auto-generated).
 
-## Advanced Topics
+### Additional Resources
 
-- **Domain & SSL setup**: See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for complete guide, troubleshooting, and technical reference
-- **Provider comparison**: See [PROVIDER_COMPARISON.md](PROVIDER_COMPARISON.md)
+- **Domain & SSL**: [DOMAIN_SETUP.md](DOMAIN_SETUP.md) - Complete guide with troubleshooting
+- **Provider comparison**: [PROVIDER_COMPARISON.md](PROVIDER_COMPARISON.md) - Detailed feature matrix
 - **Multiple environments**: Use different `.env` files or AWS profiles
 - **CI/CD integration**: Use `--force` flags to skip confirmations
 
 ## Support
 
-- Issues: [GitHub Issues](https://github.com/boscoh/deploy-vm/issues)
-- Documentation: `deploy-vm --help` or `deploy-vm <command> --help`
+- **Issues**: [GitHub Issues](https://github.com/boscoh/deploy-vm/issues)
+- **Documentation**: `deploy-vm --help` or `deploy-vm <command> --help`
