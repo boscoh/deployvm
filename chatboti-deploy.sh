@@ -13,7 +13,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +a
 fi
 
-echo "Deploying chatboti with SSL (chatboti.io)"
+echo "Deploying chatboti (IP-only, no SSL)"
 uv run deploy-vm fastapi deploy \
     chatboti \
     "$SCRIPT_DIR/../chatboti" \
@@ -21,8 +21,7 @@ uv run deploy-vm fastapi deploy \
     --app-name "chatboti" \
     --port 8000 \
     --workers 2 \
-    --domain chatboti.io \
-    --email apposite@gmail.com
+    --no-ssl
 
 echo ""
 echo "Deployment complete!"
