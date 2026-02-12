@@ -1,6 +1,5 @@
 #!/bin/bash
 # Deploy chatboti FastAPI app
-# Usage: ./chatboti-deploy.sh [--ssl]
 
 set -e
 
@@ -14,33 +13,16 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +a
 fi
 
-APP_MODULE="chatboti.server:app"
-APP_NAME="chatboti"
-PORT=8000
-WORKERS=2
-
-# Build common deploy arguments
-COMMON_ARGS=(
-    chatboti
-    "$SCRIPT_DIR/../chatboti"
-    --app-module "$APP_MODULE"
-    --app-name "$APP_NAME"
-    --port "$PORT"
-    --workers "$WORKERS"
-)
-
-if [ "$1" = "--ssl" ]; then
-    echo "Deploying chatboti with SSL (chatboti.io)"
-    uv run deploy-vm fastapi deploy \
-        "${COMMON_ARGS[@]}" \
-        --domain chatboti.io \
-        --email apposite@gmail.com
-else
-    echo "Deploying chatboti (IP-only, no SSL)"
-    uv run deploy-vm fastapi deploy \
-        "${COMMON_ARGS[@]}" \
-        --no-ssl
-fi
+echo "Deploying chatboti with SSL (chatboti.io)"
+uv run deploy-vm fastapi deploy \
+    chatboti \
+    "$SCRIPT_DIR/../chatboti" \
+    --app-module "chatboti.server:app" \
+    --app-name "chatboti" \
+    --port 8000 \
+    --workers 2 \
+    --domain chatboti.io \
+    --email apposite@gmail.com
 
 echo ""
 echo "Deployment complete!"
