@@ -82,22 +82,13 @@ def filter_aws_credentials_from_env(
     else:
         log("  No AWS credentials found in .env")
 
-    # Create temp filtered .env file
-    import tempfile
+    # Upload filtered .env file directly (no temp file needed)
+    filtered_content = "\n".join(filtered_lines) + "\n"
 
-    temp_env_path = Path(tempfile.mktemp(suffix=".env"))
-    temp_env_path.write_text("\n".join(filtered_lines) + "\n")
+    # Remove any existing .env (could be a directory from failed previous run)
+    ssh(ip, f"sudo rm -rf {remote_path}", user=ssh_user)
 
-    # Upload filtered .env file
-    rsync(
-        str(temp_env_path),
-        ip,
-        remote_path,
-        user=ssh_user,
-    )
-
-    # Clean up temp file
-    temp_env_path.unlink()
+    ssh_write_file(ip, remote_path, filtered_content, user=ssh_user)
 
     return True  # Signal that .env should be excluded from main rsync
 
