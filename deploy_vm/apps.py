@@ -303,7 +303,7 @@ class NuxtApp(BaseApp):
             sudo mkdir -p {self.app_dir}
             sudo chown -R {self.user}:{self.user} {self.app_dir}
         """).strip()
-        ssh_script(self.ip, node_script, user=self.ssh_user)
+        ssh_script(self.ip, node_script, user=self.ssh_user, show_output=True)
 
         log("Generating PM2 ecosystem config...")
         ecosystem_config = self.generate_pm2_config()
@@ -384,7 +384,7 @@ class NuxtApp(BaseApp):
                 export NODE_OPTIONS="--max-old-space-size=1024"
                 su - {self.user} -c "cd {self.app_dir} && rm -rf package-lock.json .nuxt && npm install && npm run build"
             """).strip()
-            ssh_script(self.ip, build_script, user=self.ssh_user)
+            ssh_script(self.ip, build_script, user=self.ssh_user, show_output=True)
 
         log("Starting app...")
         start_script = dedent(f"""
@@ -480,7 +480,7 @@ class FastAPIApp(BaseApp):
 
             sudo su - {self.user} -c "curl -LsSf https://astral.sh/uv/install.sh | sh"
         """).strip()
-        ssh_script(self.ip, setup_script, user=self.ssh_user)
+        ssh_script(self.ip, setup_script, user=self.ssh_user, show_output=True)
 
         python_exclude = [".venv", "__pycache__", ".git", "*.pyc"]
         local_hash = self.compute_source_hash(source, python_exclude)

@@ -27,18 +27,18 @@ DNS_VERIFY_RETRIES = 30
 DNS_VERIFY_DELAY = 10
 
 
-def ssh(ip: str, cmd: str, user: str = "deploy") -> str:
+def ssh(ip: str, cmd: str, user: str = "deploy", show_output: bool = False) -> str:
     with Connection(ip, user=user, connect_kwargs={"look_for_keys": True}) as c:
-        result = c.run(cmd, hide=True, warn=True)
+        result = c.run(cmd, hide=not show_output, warn=True)
         if result.failed:
             error(f"SSH command failed: {result.stderr}")
         return result.stdout
 
 
-def ssh_script(ip: str, script: str, user: str = "deploy") -> str:
+def ssh_script(ip: str, script: str, user: str = "deploy", show_output: bool = False) -> str:
     with Connection(ip, user=user, connect_kwargs={"look_for_keys": True}) as c:
         escaped = script.replace("'", "'\\''")
-        result = c.run(f"bash -c '{escaped}'", hide=True, warn=True)
+        result = c.run(f"bash -c '{escaped}'", hide=not show_output, warn=True)
         if result.failed:
             error(f"SSH script failed: {result.stderr}")
         return result.stdout
