@@ -35,17 +35,30 @@ def compute_hash(source: str, exclude: list[str] | None = None) -> str:
     return hasher.hexdigest()
 
 
-def filter_aws_credentials_from_env(env_path: Path) -> list[str]:
-    """Filter AWS credentials from .env file content.
+def filter_aws_credentials_from_env(
+    source_dir: str,
+    provider_name: str,
+    ip: str,
+    remote_path: str,
+    ssh_user: str,
+) -> bool:
+    """Filter AWS credentials from .env and upload filtered version.
 
     Removes AWS_PROFILE, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY
     since AWS EC2 instances use IAM roles instead.
 
-    :param env_path: Path to .env file
-    :return: List of filtered lines
+    :param source_dir: Local source directory path
+    :param provider_name: Cloud provider name
+    :param ip: Remote instance IP
+    :param remote_path: Remote path for filtered .env file
+    :param ssh_user: SSH user for rsync
+    :return: True if .env should be excluded from main rsync, False otherwise
     """
-    if not env_path.exists():
-        return []
+    env_path = Path(source_dir) / ".env"
+
+    # Only filter for AWS deployments with .env file
+    if provider_name != "aws" or not env_path.exists():
+        return False
 
     lines = env_path.read_text().splitlines()
     aws_vars = ["AWS_PROFILE=", "AWS_ACCESS_KEY_ID=", "AWS_SECRET_ACCESS_KEY="]
@@ -65,7 +78,24 @@ def filter_aws_credentials_from_env(env_path: Path) -> list[str]:
     if filtered_vars:
         log(f"Filtered AWS credentials from .env: {', '.join(filtered_vars)}")
 
-    return filtered_lines
+    # Create temp filtered .env file
+    import tempfile
+
+    temp_env_path = Path(tempfile.mktemp(suffix=".env"))
+    temp_env_path.write_text("\n".join(filtered_lines) + "\n")
+
+    # Upload filtered .env file
+    rsync(
+        str(temp_env_path),
+        ip,
+        remote_path,
+        user=ssh_user,
+    )
+
+    # Clean up temp file
+    temp_env_path.unlink()
+
+    return True  # Signal that .env should be excluded from main rsync
 
 
 class BaseApp:
@@ -453,18 +483,16 @@ class FastAPIApp(BaseApp):
         log("Uploading...")
 
         # Filter AWS credentials from .env for AWS deployments
-        env_path = Path(source) / ".env"
-        temp_env_path = None
-        if self.provider_name == "aws" and env_path.exists():
-            filtered_lines = filter_aws_credentials_from_env(env_path)
-            # Create temp filtered .env file
-            import tempfile
-            temp_env_path = Path(tempfile.mktemp(suffix=".env"))
-            temp_env_path.write_text("\n".join(filtered_lines) + "\n")
+        exclude_env = filter_aws_credentials_from_env(
+            source,
+            self.provider_name,
+            self.ip,
+            f"/home/{self.user}/{self.app_name}/.env",
+            self.ssh_user,
+        )
 
         exclude = [".venv", "__pycache__", ".git", "*.pyc", ".source_hash"]
-        if temp_env_path:
-            # Exclude original .env, we'll upload filtered version separately
+        if exclude_env:
             exclude.append(".env")
 
         rsync(
@@ -474,16 +502,6 @@ class FastAPIApp(BaseApp):
             exclude=exclude,
             user=self.ssh_user,
         )
-
-        # Upload filtered .env file if we created one
-        if temp_env_path:
-            rsync(
-                str(temp_env_path),
-                self.ip,
-                f"/home/{self.user}/{self.app_name}/.env",
-                user=self.ssh_user,
-            )
-            temp_env_path.unlink()  # Clean up temp file
 
         log("Setting up Python environment...")
         venv_script = dedent(f"""
