@@ -120,6 +120,8 @@ uv run deploy-vm dns nameservers example.com --provider-name aws
 uv run deploy-vm nginx ssl my-server example.com you@example.com --port 8000
 ```
 
+**Note:** See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for detailed usage patterns and troubleshooting.
+
 ### Multiple Apps on One Instance
 
 ```bash
@@ -188,24 +190,13 @@ See full command documentation: `deploy-vm <command> --help`
 
 ## Domain Setup
 
-### AWS Route53
+See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for complete domain and SSL configuration guide including prerequisites, troubleshooting, and technical reference.
 
-```bash
-# Tool creates hosted zone automatically
-uv run deploy-vm dns nameservers example.com --provider-name aws
+**Quick reference:**
+- **AWS Route53**: `uv run deploy-vm dns nameservers example.com --provider aws` (creates hosted zone automatically)
+- **DigitalOcean**: Configure ns1/2/3.digitalocean.com at your domain registrar
 
-# Configure nameservers at registrar (shown in output)
-# Wait 24-48 hours for propagation
-```
-
-### DigitalOcean DNS
-
-Configure these nameservers at your domain registrar:
-```
-ns1.digitalocean.com
-ns2.digitalocean.com
-ns3.digitalocean.com
-```
+After configuring nameservers, wait 24-48 hours for DNS propagation before deploying with `--domain`.
 
 ## Requirements
 
@@ -274,7 +265,7 @@ DNS nameservers cached in `<domain>.nameservers.json` (auto-generated).
 
 ## Advanced Topics
 
-- **Security**: See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for SSL/DNS details
+- **Domain & SSL setup**: See [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for complete guide, troubleshooting, and technical reference
 - **Provider comparison**: See [PROVIDER_COMPARISON.md](PROVIDER_COMPARISON.md)
 - **Multiple environments**: Use different `.env` files or AWS profiles
 - **CI/CD integration**: Use `--force` flags to skip confirmations

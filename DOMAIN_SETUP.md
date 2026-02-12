@@ -2,6 +2,8 @@
 
 Complete guide for adding custom domains with SSL/HTTPS to your deploy-vm instances.
 
+> **Note:** For general installation and usage, see [README.md](README.md). This guide focuses specifically on domain configuration, SSL certificates, and troubleshooting.
+
 ## Table of Contents
 
 1. [Quick Start](#quick-start)
