@@ -17,7 +17,7 @@ echo "Deploying chatboti (IP-only, no SSL)"
 uv run deploy-vm fastapi deploy \
     chatboti \
     "$SCRIPT_DIR/../chatboti" \
-    --command "uv run --no-sync uvicorn chatboti.server:app --host 0.0.0.0 --port 8000 --workers 2" \
+    "uv run --no-sync uvicorn chatboti.server:app --host 0.0.0.0 --port 8000 --workers 2" \
     --app-name "chatboti" \
     --port 8000 \
     --no-ssl
