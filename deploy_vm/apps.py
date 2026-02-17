@@ -471,7 +471,7 @@ class FastAPIApp(BaseApp):
         self.user = user
         self.app_name = app_name
         self.port = port
-        self.command = command or f"uv run --no-sync uvicorn app:app --host 0.0.0.0 --port {port} --workers 2"
+        self.command = command  # Only used by sync(), not needed for status/logs/restart
         self.app_dir = f"/home/{user}/{app_name}"
 
     def sync(self, source: str, *, force: bool = False) -> bool:
@@ -481,6 +481,9 @@ class FastAPIApp(BaseApp):
         :param force: Force rebuild even if source unchanged
         :return: True if full sync, False if source unchanged
         """
+        if not self.command:
+            error("Command is required for sync operation")
+
         source = str(Path(source).resolve())
 
         if not Path(source).exists():
