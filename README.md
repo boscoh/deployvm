@@ -55,9 +55,11 @@ uv run deployvm dns nameservers example.com --provider aws
 # 2. Configure at registrar, wait 24-48h for propagation
 
 # 3. Deploy with SSL
-uv run deployvm fastapi deploy my-server /path/to/app \
+uv run deployvm fastapi deploy my-server \
+    /path/to/app \
     "uv run uvicorn app:app --port 8000" \
-    --domain example.com --email you@example.com
+    --domain example.com \
+    --email you@example.com
 ```
 
 **Supported app types:**
