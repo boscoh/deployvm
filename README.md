@@ -65,8 +65,16 @@ uv run deployvm fastapi deploy my-server \
 ```
 
 **Supported app types:**
+
 - `fastapi deploy` - FastAPI apps with uvicorn + supervisord
+  - Requires `pyproject.toml` and `uv` for dependency management
+  - App must be importable as a Python package
+  - Command must be a `uv run ...` invocation
+
 - `nuxt deploy` - Nuxt apps with PM2
+  - Requires `package.json` with `build` and `start` scripts
+  - Node.js managed via `nvm` on the server
+  - Builds locally by default (`--local-build`), uploads `.output/`
 
 ### 3. Manage Your Deployment
 
