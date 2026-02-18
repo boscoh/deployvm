@@ -44,7 +44,7 @@ AWS_REGION=ap-southeast-2
 **Without SSL:**
 ```bash
 uv run deployvm fastapi deploy my-server /path/to/app \
-    "uv run myapp server --port 8000" --no-ssl
+    "uv run uvicorn app:app --port 8000" --no-ssl
 ```
 
 **With domain + SSL:**
@@ -56,7 +56,7 @@ uv run deployvm dns nameservers example.com --provider aws
 
 # 3. Deploy with SSL
 uv run deployvm fastapi deploy my-server /path/to/app \
-    "uv run myapp server --port 8000" \
+    "uv run uvicorn app:app --port 8000" \
     --domain example.com --email you@example.com
 ```
 
@@ -70,7 +70,7 @@ uv run deployvm fastapi deploy my-server /path/to/app \
 uv run deployvm instance verify my-server --domain example.com
 uv run deployvm fastapi logs my-server
 uv run deployvm fastapi restart my-server
-uv run deployvm fastapi sync my-server /path/to/app "uv run myapp server --port 8000"
+uv run deployvm fastapi sync my-server /path/to/app "uv run uvicorn app:app --port 8000"
 ```
 
 ## Common Workflows
@@ -79,7 +79,7 @@ uv run deployvm fastapi sync my-server /path/to/app "uv run myapp server --port 
 
 ```bash
 # 1. Deploy without SSL
-uv run deployvm fastapi deploy my-server /path/to/app "uv run myapp server --port 8000" --no-ssl
+uv run deployvm fastapi deploy my-server /path/to/app "uv run uvicorn app:app --port 8000" --no-ssl
 
 # 2. Get nameservers and configure at registrar, wait 24-48h
 
@@ -91,7 +91,7 @@ uv run deployvm nginx ssl my-server example.com you@example.com --port 8000
 
 ```bash
 uv run deployvm fastapi deploy my-server /path/to/api \
-    "uv run myapi server --port 8000" \
+    "uv run uvicorn app:app --port 8000" \
     --app-name api --port 8000 --domain api.example.com --email you@example.com
 
 uv run deployvm nuxt deploy my-server /path/to/frontend \
@@ -130,9 +130,9 @@ When deploying to AWS EC2, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_A
 EC2 instances automatically get Bedrock access via IAM roles:
 
 ```bash
-uv run deployvm fastapi deploy my-server /path/to/app "uv run myapp server --port 8000" --no-ssl
+uv run deployvm fastapi deploy my-server /path/to/app "uv run uvicorn app:app --port 8000" --no-ssl
 # or with custom role:
-uv run deployvm fastapi deploy my-server /path/to/app "uv run myapp server --port 8000" --iam-role my-role --no-ssl
+uv run deployvm fastapi deploy my-server /path/to/app "uv run uvicorn app:app --port 8000" --iam-role my-role --no-ssl
 ```
 
 Your app code needs no credentials:

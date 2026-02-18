@@ -8,7 +8,7 @@ Usage: uv run deployvm <noun> <verb> [options]
 Examples:
     uv run deployvm instance create myapp
     uv run deployvm instance list
-    uv run deployvm fastapi deploy myapp ./src "uv run myapp server --port 8000"
+    uv run deployvm fastapi deploy myapp ./src "uv run uvicorn app:app --port 8000"
     uv run deployvm nginx ssl myapp example.com user@example.com
 """
 
