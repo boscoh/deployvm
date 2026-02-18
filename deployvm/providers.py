@@ -344,13 +344,14 @@ class AWSProvider:
         os_image: str | None = None,
         region: str | None = None,
         vm_size: str | None = None,
+        aws_profile: str | None = None,
     ):
         self.provider_name: ProviderName = "aws"
         self.os_image = (
             os_image or "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
         )
         self.vm_size = vm_size or "t3.micro"
-        self.aws_config = AWSProvider.get_aws_config(is_raise_exception=False)
+        self.aws_config = AWSProvider.get_aws_config(is_raise_exception=False, profile=aws_profile)
 
         if region:
             self.aws_config["region_name"] = region
@@ -390,12 +391,13 @@ class AWSProvider:
             )
 
     @staticmethod
-    def get_aws_config(is_raise_exception: bool = True):
+    def get_aws_config(is_raise_exception: bool = True, profile: str | None = None):
         """Get AWS configuration for boto3 client initialization.
 
         Falls back to boto3's credential chain if AWS_PROFILE doesn't exist.
 
         :param is_raise_exception: Raise exceptions or warn on errors
+        :param profile: Explicit AWS profile name (overrides AWS_PROFILE env var)
         :return: Dict with profile_name and region_name keys
         """
         load_dotenv()
@@ -421,7 +423,7 @@ class AWSProvider:
                 elif section != "default":
                     available_profiles.add(section)
 
-        profile_name = os.getenv("AWS_PROFILE")
+        profile_name = profile or os.getenv("AWS_PROFILE")
         profile_not_found = False
         if profile_name:
             if profile_name in available_profiles:
@@ -508,12 +510,14 @@ class AWSProvider:
         return aws_config
 
     def validate_auth(self) -> None:
+        profile = self.aws_config.get("profile_name", "default")
+        log(f"Authenticating with AWS (profile: {profile})...")
         try:
             session = self._get_session()
             sts = session.client("sts")
             sts.get_caller_identity()
         except Exception as e:
-            error(f"AWS authentication failed: {e}")
+            error(f"AWS authentication failed (profile: {profile}): {e}")
 
     def _get_ec2_client(self):
         return self._get_session().client("ec2")
@@ -1025,7 +1029,8 @@ class AWSProvider:
         if not zone_id:
             error(f"No Route53 hosted zone found for domain: '{domain}'")
 
-        log(f"Updating Route53 DNS records for '{domain}'...")
+        profile = self.aws_config.get("profile_name", "default")
+        log(f"Updating Route53 DNS records for '{domain}' (profile: {profile})...")
 
         for record_name in [domain, f"www.{domain}"]:
             change_batch = {
@@ -1117,6 +1122,7 @@ def get_provider(
     region: str | None = None,
     os_image: str | None = None,
     vm_size: str | None = None,
+    aws_profile: str | None = None,
 ) -> Provider:
     """Get a provider instance with defaults applied."""
     if provider is None:
@@ -1133,4 +1139,4 @@ def get_provider(
     if provider == "digitalocean":
         return DigitalOceanProvider(os_image=os_image, region=region, vm_size=vm_size)
     else:  # aws
-        return AWSProvider(os_image=os_image, region=region, vm_size=vm_size)
+        return AWSProvider(os_image=os_image, region=region, vm_size=vm_size, aws_profile=aws_profile)

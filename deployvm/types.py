@@ -25,6 +25,7 @@ class InstanceData(TypedDict, total=False):
     vm_size: str
     user: str
     iam_role: str  # AWS only: IAM role name (default: deploy-vm-bedrock)
+    aws_profile: str  # AWS only: profile name from ~/.aws/config
     apps: list[AppInfo]
 
 

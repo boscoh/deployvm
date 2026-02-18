@@ -381,11 +381,13 @@ def wait_for_ssh(ip: str, user: str = "deploy", timeout: int = SSH_TIMEOUT):
     error(f"SSH timeout after '{timeout}s'")
 
 
-def verify_http(ip: str) -> bool:
-    log("Verifying HTTP connectivity on port 80...")
+def verify_http(ip: str, domain: str | None = None) -> bool:
+    # Use domain URL when available — nginx server_name won't match raw IP requests
+    url = f"http://{domain}/" if domain else f"http://{ip}/"
+    log(f"Verifying HTTP connectivity on port 80 via '{url}'...")
     for i in range(HTTP_VERIFY_RETRIES):
         try:
-            req = urllib.request.Request(f"http://{ip}/")
+            req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=5) as response:
                 status_code = response.getcode()
                 if str(status_code)[0] in "2345":
@@ -393,9 +395,9 @@ def verify_http(ip: str) -> bool:
                     return True
         except (urllib.error.URLError, urllib.error.HTTPError, Exception):
             pass
-        warn(f"Cannot connect to 'http://{ip}/' ({i + 1}/{HTTP_VERIFY_RETRIES})")
+        warn(f"Cannot connect to '{url}' ({i + 1}/{HTTP_VERIFY_RETRIES})")
         time.sleep(HTTP_VERIFY_DELAY)
-    error(f"Cannot connect to server on port 80. Check UFW: ssh deploy@'{ip}' 'sudo ufw status'")
+    error(f"Cannot connect to '{url}' on port 80. Check UFW: ssh deploy@'{ip}' 'sudo ufw status'")
 
 
 def setup_firewall(ip: str, ssh_user: str = "root"):
@@ -513,7 +515,10 @@ def ensure_web_firewall(ip: str, ssh_user: str = "deploy"):
 
 
 def ensure_dns_matches(
-    domain: str, expected_ip: str, provider_name: ProviderName = "digitalocean"
+    domain: str,
+    expected_ip: str,
+    provider_name: ProviderName = "digitalocean",
+    aws_profile: str | None = None,
 ) -> bool:
     from deployvm.providers import get_provider
 
@@ -525,8 +530,9 @@ def ensure_dns_matches(
     warn(
         f"DNS mismatch: '{domain}' points to '{current_ip or 'nothing'}', expected '{expected_ip}'"
     )
-    log("Updating DNS...")
-    p = get_provider(provider_name)
+    profile_info = f" (profile: {aws_profile})" if aws_profile else ""
+    log(f"Updating DNS via {provider_name}{profile_info}...")
+    p = get_provider(provider_name, aws_profile=aws_profile)
     p.setup_dns(domain, expected_ip)
     log("DNS updated (may take a few minutes to propagate)")
     return True
@@ -627,17 +633,19 @@ def setup_nginx_ssl(
     skip_dns: bool = False,
     ssh_user: str = "deploy",
     provider_name: ProviderName = "digitalocean",
+    aws_profile: str | None = None,
 ):
     """Setup nginx and SSL certificate."""
     ensure_web_firewall(ip, ssh_user=ssh_user)
     if not skip_dns:
-        ensure_dns_matches(domain, ip, provider_name=provider_name)
+        ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
 
     server_block = generate_nginx_server_block(
         f"{domain} www.{domain}", port, static_dir
     )
 
-    log("Setting up nginx...")
+    profile_info = f" (profile: {aws_profile})" if aws_profile else ""
+    log(f"Setting up nginx for '{domain}' via {provider_name}{profile_info}...")
     ssh_script(
         ip, "sudo apt-get update && sudo apt-get install -y nginx", user=ssh_user
     )
@@ -662,7 +670,7 @@ def setup_nginx_ssl(
     else:
         error("DNS verification timeout")
 
-    verify_http(ip)
+    verify_http(ip, domain=domain)
 
     log("Obtaining SSL certificate...")
     ssl_script = dedent(f"""

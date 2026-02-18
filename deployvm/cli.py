@@ -103,6 +103,10 @@ def create_instance(
     }
     if iam_role:
         instance_data["iam_role"] = iam_role
+    if p.provider_name == "aws":
+        aws_profile = p.aws_config.get("profile_name")
+        if aws_profile:
+            instance_data["aws_profile"] = aws_profile
 
     save_instance(name, instance_data)
 
@@ -257,19 +261,21 @@ def verify_command(
 def nginx_ip_command(
     target: str,
     *,
-    port: int = 3000,
+    port: int | None = None,
     static_dir: str | None = None,
     ssh_user: str = "deploy",
 ):
     """Setup nginx for IP-only access (no SSL certificate).
 
     :param target: Instance name or IP address
-    :param port: Application port (default: 3000)
+    :param port: Application port (default: read from instance, fallback 3000)
     :param static_dir: Static files directory to serve directly
     :param ssh_user: SSH user for remote connection
     """
-    ip = resolve_ip(target)
-    setup_nginx_ip(ip, port=port, static_dir=static_dir, ssh_user=ssh_user)
+    instance = resolve_instance(target)
+    ip = instance["ip"]
+    resolved_port = port or (instance.get("apps") or [{}])[0].get("port") or 3000
+    setup_nginx_ip(ip, port=resolved_port, static_dir=static_dir, ssh_user=ssh_user)
 
 
 @nginx_app.command(name="ssl")
@@ -278,33 +284,38 @@ def nginx_ssl_command(
     domain: str,
     email: str,
     *,
-    port: int = 3000,
+    port: int | None = None,
     static_dir: str | None = None,
     skip_dns: bool = False,
     ssh_user: str = "deploy",
-    provider: ProviderName = "digitalocean",
+    provider: ProviderName | None = None,
 ):
     """Setup nginx with SSL certificate using Let's Encrypt.
 
     :param target: Instance name or IP address
     :param domain: Domain name for SSL certificate
     :param email: Email for Let's Encrypt registration
-    :param port: Application port (default: 3000)
+    :param port: Application port (default: read from instance, fallback 3000)
     :param static_dir: Static files directory to serve directly
     :param skip_dns: Skip DNS validation check
     :param ssh_user: SSH user for remote connection
-    :param provider: Cloud provider for DNS validation
+    :param provider: Cloud provider for DNS validation (default: read from instance, fallback digitalocean)
     """
-    ip = resolve_ip(target)
+    instance = resolve_instance(target)
+    ip = instance["ip"]
+    resolved_port = port or (instance.get("apps") or [{}])[0].get("port") or 3000
+    provider_name: ProviderName = provider or instance.get("provider", "digitalocean")
+    aws_profile = instance.get("aws_profile") if provider_name == "aws" else None
     setup_nginx_ssl(
         ip,
         domain,
         email,
-        port=port,
+        port=resolved_port,
         static_dir=static_dir,
         skip_dns=skip_dns,
         ssh_user=ssh_user,
-        provider_name=provider,
+        provider_name=provider_name,
+        aws_profile=aws_profile,
     )
 
 
@@ -519,8 +530,9 @@ def deploy_nuxt(
     )
 
     ensure_web_firewall(ip, ssh_user=nuxt_ssh_user)
+    aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
     if not no_ssl:
-        ensure_dns_matches(domain, ip, provider_name=data["provider"])
+        ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
     nuxt_static_dir = f"/home/{user}/{app_name}/.output/public"
     if no_ssl:
@@ -534,6 +546,7 @@ def deploy_nuxt(
             static_dir=nuxt_static_dir,
             ssh_user=nuxt_ssh_user,
             provider_name=data["provider"],
+            aws_profile=aws_profile,
         )
 
     log("Verifying deployment...")
@@ -750,8 +763,9 @@ def deploy_fastapi(
     )
 
     ensure_web_firewall(ip, ssh_user=ssh_user)
+    aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
     if not no_ssl:
-        ensure_dns_matches(domain, ip, provider_name=data["provider"])
+        ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
     static_dir = f"/home/{user}/{app_name}/{static_subdir}" if static_subdir else None
     if no_ssl:
@@ -765,6 +779,7 @@ def deploy_fastapi(
             static_dir=static_dir,
             ssh_user=ssh_user,
             provider_name=data["provider"],
+            aws_profile=aws_profile,
         )
 
     log("Verifying deployment...")
@@ -789,66 +804,41 @@ def get_nameservers(
     """Get nameservers for a domain (creates hosted zone if needed for AWS).
 
     For AWS: Creates a Route53 hosted zone if it doesn't exist, then returns nameservers.
-    Caches result in <domain>.nameservers.json for faster subsequent lookups.
     For DigitalOcean: Returns standard DigitalOcean nameservers.
 
     :param domain: Domain name (e.g., example.com)
     :param provider: Cloud provider (aws or digitalocean)
     """
-    import json
-    from pathlib import Path
-
     p = get_provider(provider)
 
     if p.provider_name == "aws":
         import time
 
-        ns_file = Path(f"{domain}.nameservers.json")
+        p.validate_auth()
+        route53 = p._get_route53_client()
 
-        # Check if we have cached nameservers
-        if ns_file.exists():
-            log(f"Loading nameservers from '{ns_file}'")
-            data = json.loads(ns_file.read_text())
-            zone_id = data["zone_id"]
-            zone_name = data["zone_name"]
-            nameservers = data["nameservers"]
-        else:
-            p.validate_auth()
-            route53 = p._get_route53_client()
+        response = route53.list_hosted_zones()
+        zone_id = None
+        zone_name = None
 
-            response = route53.list_hosted_zones()
-            zone_id = None
-            zone_name = None
+        for zone in response["HostedZones"]:
+            if zone["Name"] == f"{domain}." or zone["Name"] == domain:
+                zone_id = zone["Id"]
+                zone_name = zone["Name"]
+                break
 
-            for zone in response["HostedZones"]:
-                if zone["Name"] == f"{domain}." or zone["Name"] == domain:
-                    zone_id = zone["Id"]
-                    zone_name = zone["Name"]
-                    break
+        if not zone_id:
+            log(f"Creating Route53 hosted zone for '{domain}'...")
+            create_response = route53.create_hosted_zone(
+                Name=domain,
+                CallerReference=str(int(time.time() * 1000)),
+            )
+            zone_id = create_response["HostedZone"]["Id"]
+            zone_name = create_response["HostedZone"]["Name"]
+            log(f"Created hosted zone: '{zone_id}'")
 
-            if not zone_id:
-                log(f"Creating Route53 hosted zone for '{domain}'...")
-                create_response = route53.create_hosted_zone(
-                    Name=domain,
-                    CallerReference=str(int(time.time() * 1000)),
-                )
-                zone_id = create_response["HostedZone"]["Id"]
-                zone_name = create_response["HostedZone"]["Name"]
-                log(f"Created hosted zone: '{zone_id}'")
-
-            zone_response = route53.get_hosted_zone(Id=zone_id)
-            nameservers = zone_response["DelegationSet"]["NameServers"]
-
-            # Save nameservers to file
-            data = {
-                "domain": domain,
-                "provider": "aws",
-                "zone_id": zone_id,
-                "zone_name": zone_name,
-                "nameservers": nameservers,
-            }
-            ns_file.write_text(json.dumps(data, indent=2))
-            log(f"Saved nameservers to '{ns_file}'")
+        zone_response = route53.get_hosted_zone(Id=zone_id)
+        nameservers = zone_response["DelegationSet"]["NameServers"]
 
         print(f"Route53 Hosted Zone: {zone_name}")
         print(f"Zone ID: {zone_id}")
