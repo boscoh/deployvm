@@ -320,10 +320,19 @@ def sync_nuxt(
     force: bool = False,
     node_version: int = 20,
 ):
-    """Sync Nuxt app to server.
+    """Sync Nuxt app to existing server.
 
+    Deploys the Nuxt application to an already-running instance by syncing files,
+    building the app, and restarting PM2. Does not create instances or configure nginx.
+
+    :param target: Instance name or IP address
+    :param source: Local source directory path
+    :param user: App user (reads from instance.json if not specified)
+    :param port: Application port (default: 3000)
+    :param app_name: Name of the app (default: nuxt)
     :param local_build: Build locally instead of on server
     :param force: Force rebuild even if source unchanged
+    :param node_version: Node.js version to use (default: 20)
     """
     # Check if instance file exists (unless target is an IP address)
     if not is_valid_ip(target):
@@ -448,11 +457,26 @@ def deploy_nuxt(
     no_ssl: bool = False,
     iam_role: str | None = None,
 ):
-    """Deploy Nuxt app: create instance, setup server, deploy app, configure nginx.
+    """Deploy Nuxt app with full infrastructure setup.
 
+    Creates a new cloud instance (if needed), sets up the server, deploys the app,
+    and configures nginx with SSL. This is the complete deployment solution.
+
+    :param name: Instance name (will create {name}.instance.json)
+    :param source: Local source directory path
+    :param domain: Domain name for SSL setup (required unless --no-ssl)
+    :param email: Email for Let's Encrypt SSL certificate (required unless --no-ssl)
+    :param user: Remote user to run the app as (default: deploy)
+    :param ssh_user: SSH user for remote connection (default: deploy)
+    :param port: Application port (default: 3000)
+    :param app_name: Name of the app (default: nuxt)
+    :param provider: Cloud provider (aws or digitalocean, default: digitalocean)
+    :param region: Cloud provider region (default: syd1)
     :param vm_size: Instance size (AWS: t3.micro, t3.small, etc. | DO: s-1vcpu-1gb, s-2vcpu-2gb, etc.)
-    :param os_image: OS image name/ID
+    :param os_image: OS image name/ID (default: ubuntu-24-04-x64)
     :param swap_size: Swap file size (default: 4G)
+    :param node_version: Node.js version to use (default: 20)
+    :param local_build: Build locally instead of on server
     :param no_ssl: Skip SSL/domain setup, use IP-only access
     :param iam_role: AWS only: IAM role name for instance profile (default: deploy-vm-bedrock)
     """
@@ -544,7 +568,10 @@ def sync_fastapi(
     app_name: str = "fastapi",
     force: bool = False,
 ) -> bool:
-    """Sync FastAPI app to server using supervisord.
+    """Sync FastAPI app to existing server.
+
+    Deploys the FastAPI application to an already-running instance by syncing files,
+    installing dependencies, and restarting supervisord. Does not create instances or configure nginx.
 
     :param target: Instance name or path to .instance.json file
     :param source: Local source directory path
@@ -686,7 +713,10 @@ def deploy_fastapi(
     no_ssl: bool = False,
     iam_role: str | None = None,
 ):
-    """Deploy FastAPI app: create instance, setup server, deploy app, configure nginx.
+    """Deploy FastAPI app with full infrastructure setup.
+
+    Creates a new cloud instance (if needed), sets up the server, deploys the app,
+    and configures nginx with SSL. This is the complete deployment solution.
 
     :param name: Instance name (will create {name}.instance.json)
     :param source: Local source directory path
