@@ -82,7 +82,7 @@ uv run deployvm fastapi deploy my-server \
 uv run deployvm instance verify my-server --domain example.com
 uv run deployvm fastapi logs my-server
 uv run deployvm fastapi restart my-server
-uv run deployvm fastapi sync my-server /path/to/app "uv run uvicorn app:app --port 8000" --port 8000
+uv run deployvm fastapi sync my-server /path/to/app "uv run uvicorn app:app --port 8000"
 ```
 
 ## Common Workflows
@@ -96,7 +96,7 @@ uv run deployvm fastapi deploy my-server /path/to/app "uv run uvicorn app:app --
 # 2. Get nameservers and configure at registrar, wait 24-48h
 
 # 3. Add SSL
-uv run deployvm nginx ssl my-server example.com you@example.com --port 8000
+uv run deployvm nginx ssl my-server example.com you@example.com
 ```
 
 ### Multiple Apps on One Instance
