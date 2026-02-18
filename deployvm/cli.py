@@ -313,8 +313,6 @@ def sync_nuxt(
     target: str,
     source: str,
     *,
-    port: int = 3000,
-    app_name: str = "nuxt",
     local_build: bool = True,
     force: bool = False,
     node_version: int = 20,
@@ -326,8 +324,6 @@ def sync_nuxt(
 
     :param target: Instance name or IP address
     :param source: Local source directory path
-    :param port: Application port (default: 3000)
-    :param app_name: Name of the app (default: nuxt)
     :param local_build: Build locally instead of on server
     :param force: Force rebuild even if source unchanged
     :param node_version: Node.js version to use (default: 20)
@@ -349,10 +345,11 @@ def sync_nuxt(
     if not check_instance_reachable(ip, ssh_user):
         error(f"Instance '{ip}' is not reachable via SSH. Please verify the instance is running and SSH access is configured.")
 
-    # Update instance metadata with app info if needed
-    if "apps" not in instance or not any(a["name"] == app_name for a in instance.get("apps", [])):
-        add_app_to_instance(instance, app_name, "nuxt", port)
-        save_instance(target, instance)
+    apps = [a for a in get_instance_apps(instance) if a["type"] == "nuxt"]
+    fallback = target if not is_valid_ip(target) else "nuxt"
+    app_name = resolve_app_name(apps, "Nuxt", None, fallback)
+    app_data = next((a for a in apps if a["name"] == app_name), {})
+    port = app_data.get("port", 3000)
 
     nuxt = NuxtApp(
         instance,
@@ -515,8 +512,6 @@ def deploy_nuxt(
     sync_nuxt(
         name,
         source,
-        port=port,
-        app_name=app_name,
         local_build=local_build,
         node_version=node_version,
     )
@@ -558,8 +553,6 @@ def sync_fastapi(
     source: str,
     command: str,
     *,
-    port: int = 8000,
-    app_name: str = "fastapi",
     force: bool = False,
 ) -> bool:
     """Sync FastAPI app to existing server.
@@ -570,8 +563,6 @@ def sync_fastapi(
     :param target: Instance name or path to .instance.json file
     :param source: Local source directory path
     :param command: Command to run (must start with "uv", e.g., "uv run --no-sync uvicorn app:app --host 0.0.0.0 --port 8000 --workers 2")
-    :param port: Port number for the app (default: 8000)
-    :param app_name: Name of the app (default: fastapi)
     :param force: Force rebuild even if source unchanged
     :return: True if full sync, False if source unchanged
     """
@@ -592,10 +583,11 @@ def sync_fastapi(
     if not check_instance_reachable(ip, ssh_user):
         error(f"Instance '{ip}' is not reachable via SSH. Please verify the instance is running and SSH access is configured.")
 
-    # Update instance metadata with app info if needed
-    if "apps" not in instance or not any(a["name"] == app_name for a in instance.get("apps", [])):
-        add_app_to_instance(instance, app_name, "fastapi", port)
-        save_instance(target, instance)
+    apps = [a for a in get_instance_apps(instance) if a["type"] == "fastapi"]
+    fallback = target if not is_valid_ip(target) else "fastapi"
+    app_name = resolve_app_name(apps, "FastAPI", None, fallback)
+    app_data = next((a for a in apps if a["name"] == app_name), {})
+    port = app_data.get("port", 8000)
 
     fastapi = FastAPIApp(
         instance,
@@ -750,8 +742,6 @@ def deploy_fastapi(
     sync_fastapi(
         name,
         source,
-        port=port,
-        app_name=app_name,
         command=command,
     )
 
