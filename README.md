@@ -2,6 +2,17 @@
 
 Python CLI for deploying web applications to cloud providers (DigitalOcean and AWS).
 
+When setting up a VM it will:
+- Create a cloud instance (DigitalOcean droplet or AWS EC2)
+- Configure firewall rules to open ports 80, 443, and SSH
+- Create a `deploy` user with passwordless sudo
+- Set up a swap file
+- Upload your SSH key to the provider
+- Install `uv`, `nginx`, `supervisord` (FastAPI) or `pm2` (Nuxt)
+- Deploy your app and configure it to run as a service
+- Set up nginx as a reverse proxy
+- Optionally provision a Let's Encrypt SSL certificate via certbot
+
 ## Installation
 
 ```bash
@@ -32,7 +43,8 @@ AWS_REGION=ap-southeast-2
 
 **Without SSL:**
 ```bash
-uv run deployvm fastapi deploy my-server /path/to/app --no-ssl
+uv run deployvm fastapi deploy my-server /path/to/app \
+    "uv run myapp server --port 8000" --no-ssl
 ```
 
 **With domain + SSL:**
@@ -44,6 +56,7 @@ uv run deployvm dns nameservers example.com --provider aws
 
 # 3. Deploy with SSL
 uv run deployvm fastapi deploy my-server /path/to/app \
+    "uv run myapp server --port 8000" \
     --domain example.com --email you@example.com
 ```
 
@@ -57,7 +70,7 @@ uv run deployvm fastapi deploy my-server /path/to/app \
 uv run deployvm instance verify my-server --domain example.com
 uv run deployvm fastapi logs my-server
 uv run deployvm fastapi restart my-server
-uv run deployvm fastapi sync my-server /path/to/app
+uv run deployvm fastapi sync my-server /path/to/app "uv run myapp server --port 8000"
 ```
 
 ## Common Workflows
@@ -66,7 +79,7 @@ uv run deployvm fastapi sync my-server /path/to/app
 
 ```bash
 # 1. Deploy without SSL
-uv run deployvm fastapi deploy my-server /path/to/app --no-ssl
+uv run deployvm fastapi deploy my-server /path/to/app "uv run myapp server --port 8000" --no-ssl
 
 # 2. Get nameservers and configure at registrar, wait 24-48h
 
@@ -78,6 +91,7 @@ uv run deployvm nginx ssl my-server example.com you@example.com --port 8000
 
 ```bash
 uv run deployvm fastapi deploy my-server /path/to/api \
+    "uv run myapi server --port 8000" \
     --app-name api --port 8000 --domain api.example.com --email you@example.com
 
 uv run deployvm nuxt deploy my-server /path/to/frontend \
@@ -116,9 +130,9 @@ When deploying to AWS EC2, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_A
 EC2 instances automatically get Bedrock access via IAM roles:
 
 ```bash
-uv run deployvm fastapi deploy my-server /path/to/app --no-ssl
+uv run deployvm fastapi deploy my-server /path/to/app "uv run myapp server --port 8000" --no-ssl
 # or with custom role:
-uv run deployvm fastapi deploy my-server /path/to/app --iam-role my-role --no-ssl
+uv run deployvm fastapi deploy my-server /path/to/app "uv run myapp server --port 8000" --iam-role my-role --no-ssl
 ```
 
 Your app code needs no credentials:

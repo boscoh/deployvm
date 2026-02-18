@@ -3,13 +3,13 @@
 
 Prerequisites: doctl CLI authenticated, SSH key in DigitalOcean, domain nameservers configured.
 
-Usage: uv run deploy-vm <noun> <verb> [options]
+Usage: uv run deployvm <noun> <verb> [options]
 
 Examples:
-    uv run deploy-vm instance create myapp
-    uv run deploy-vm instance list
-    uv run deploy-vm fastapi deploy myapp ./src
-    uv run deploy-vm nginx ssl myapp example.com user@example.com
+    uv run deployvm instance create myapp
+    uv run deployvm instance list
+    uv run deployvm fastapi deploy myapp ./src "uv run myapp server --port 8000"
+    uv run deployvm nginx ssl myapp example.com user@example.com
 """
 
 from pathlib import Path
@@ -40,7 +40,7 @@ from .server import (
 from .utils import error, get_ssh_user, log, resolve_app_name, warn
 
 app = cyclopts.App(
-    name="deploy-vm", help="Deploy apps to cloud providers", sort_key=None
+    name="deployvm", help="Deploy apps to cloud providers", sort_key=None
 )
 
 instance_app = cyclopts.App(name="instance", help="Manage cloud instances", sort_key=1)
