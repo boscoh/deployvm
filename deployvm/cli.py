@@ -313,7 +313,6 @@ def sync_nuxt(
     target: str,
     source: str,
     *,
-    user: str | None = None,
     port: int = 3000,
     app_name: str = "nuxt",
     local_build: bool = True,
@@ -327,7 +326,6 @@ def sync_nuxt(
 
     :param target: Instance name or IP address
     :param source: Local source directory path
-    :param user: App user (reads from instance.json if not specified)
     :param port: Application port (default: 3000)
     :param app_name: Name of the app (default: nuxt)
     :param local_build: Build locally instead of on server
@@ -341,7 +339,7 @@ def sync_nuxt(
             error(f"Instance file not found: {instance_file}\nCreate an instance first with: deploy-vm instance create {target}")
 
     instance = resolve_instance(target)
-    user = user or instance.get("user", "deploy")
+    user = instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
     ip = instance.get("ip")
 
@@ -560,7 +558,6 @@ def sync_fastapi(
     source: str,
     command: str,
     *,
-    user: str | None = None,
     port: int = 8000,
     app_name: str = "fastapi",
     force: bool = False,
@@ -573,7 +570,6 @@ def sync_fastapi(
     :param target: Instance name or path to .instance.json file
     :param source: Local source directory path
     :param command: Command to run (must start with "uv", e.g., "uv run --no-sync uvicorn app:app --host 0.0.0.0 --port 8000 --workers 2")
-    :param user: Remote user to run the app as (default: deploy)
     :param port: Port number for the app (default: 8000)
     :param app_name: Name of the app (default: fastapi)
     :param force: Force rebuild even if source unchanged
@@ -586,7 +582,7 @@ def sync_fastapi(
             error(f"Instance file not found: {instance_file}\nCreate an instance first with: deploy-vm instance create {target}")
 
     instance = resolve_instance(target)
-    user = user or instance.get("user", "deploy")
+    user = instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
     ip = instance.get("ip")
 
