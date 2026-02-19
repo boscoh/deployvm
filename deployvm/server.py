@@ -16,6 +16,7 @@ import dns.resolver
 from fabric import Connection
 from rich import print
 
+from .providers import check_aws_auth
 from .utils import error, log, warn
 
 ProviderName = Literal["digitalocean", "aws"]
@@ -27,15 +28,28 @@ DNS_VERIFY_RETRIES = 30
 DNS_VERIFY_DELAY = 10
 
 
-def check_instance_reachable(ip: str, ssh_user: str = "deploy") -> bool:
+def check_instance_auth(instance: dict) -> None:
+    """Validate cloud provider auth for instance, fail fast if credentials expired.
+
+    :param instance: Instance data dictionary (must have 'provider' key)
+    """
+    if instance.get("provider") == "aws":
+        check_aws_auth(instance.get("aws_profile"))
+
+
+def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 10) -> bool:
     """Quick check if instance is reachable via SSH.
 
     :param ip: Instance IP address
     :param ssh_user: SSH user for connection
+    :param timeout: Connection timeout in seconds
     :return: True if reachable, False otherwise
     """
     try:
-        ssh(ip, "echo ping", user=ssh_user)
+        with Connection(
+            ip, user=ssh_user, connect_kwargs={"look_for_keys": True, "timeout": timeout}
+        ) as c:
+            c.run("echo ping", hide=True)
         return True
     except Exception:
         return False

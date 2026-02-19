@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import boto3
-from botocore.exceptions import ClientError, ProfileNotFound
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
 from .utils import error, log, run_cmd, run_cmd_json, warn
@@ -351,7 +351,7 @@ class AWSProvider:
             os_image or "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
         )
         self.vm_size = vm_size or "t3.micro"
-        self.aws_config = AWSProvider.get_aws_config(is_raise_exception=False, profile=aws_profile)
+        self.aws_config = AWSProvider.get_aws_config(profile=aws_profile)
 
         if region:
             self.aws_config["region_name"] = region
@@ -391,14 +391,14 @@ class AWSProvider:
             )
 
     @staticmethod
-    def get_aws_config(is_raise_exception: bool = True, profile: str | None = None):
-        """Get AWS configuration for boto3 client initialization.
+    def get_aws_config(profile: str | None = None) -> dict:
+        """Load AWS configuration for boto3 session initialization.
 
-        Falls back to boto3's credential chain if AWS_PROFILE doesn't exist.
+        Reads profile and region from config files and environment variables.
+        Does not validate credentials — call check_aws_auth() for that.
 
-        :param is_raise_exception: Raise exceptions or warn on errors
         :param profile: Explicit AWS profile name (overrides AWS_PROFILE env var)
-        :return: Dict with profile_name and region_name keys
+        :return: Dict with profile_name and/or region_name keys for boto3.Session()
         """
         load_dotenv()
 
@@ -407,117 +407,33 @@ class AWSProvider:
         credentials_path = os.path.expanduser("~/.aws/credentials")
         config_path = os.path.expanduser("~/.aws/config")
 
-        if os.path.exists(credentials_path):
-            import configparser
-            config = configparser.ConfigParser()
-            config.read(credentials_path)
-            available_profiles.update(config.sections())
-
-        if os.path.exists(config_path):
-            import configparser
-            config = configparser.ConfigParser()
-            config.read(config_path)
-            for section in config.sections():
-                if section.startswith("profile "):
-                    available_profiles.add(section[8:])
-                elif section != "default":
-                    available_profiles.add(section)
+        import configparser
+        for path in [credentials_path, config_path]:
+            if os.path.exists(path):
+                cfg = configparser.ConfigParser()
+                cfg.read(path)
+                for section in cfg.sections():
+                    if section.startswith("profile "):
+                        available_profiles.add(section[8:])
+                    elif section != "default":
+                        available_profiles.add(section)
 
         profile_name = profile or os.getenv("AWS_PROFILE")
-        profile_not_found = False
         if profile_name:
             if profile_name in available_profiles:
                 aws_config["profile_name"] = profile_name
             else:
                 log(f"AWS profile '{profile_name}' not found, using default credential chain...")
-                profile_not_found = True
+                os.environ.pop("AWS_PROFILE", None)
 
         region = os.getenv("AWS_REGION")
         if region:
             aws_config["region_name"] = region
 
-        if profile_not_found:
-            os.environ.pop("AWS_PROFILE", None)
-
-        try:
-            session = boto3.Session(**aws_config)
-            credentials = session.get_credentials()
-
-            if not credentials:
-                if is_raise_exception:
-                    if available_profiles:
-                        error(
-                            f"No AWS credentials found.\n"
-                            f"Available profiles: {', '.join(available_profiles)}\n"
-                            f"To configure: aws configure\n"
-                            f"Or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables"
-                        )
-                    else:
-                        error(
-                            f"No AWS credentials found.\n"
-                            f"To configure: aws configure\n"
-                            f"Or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables"
-                        )
-                return aws_config
-
-            sts = session.client("sts")
-            sts.get_caller_identity()
-
-            if profile_name and profile_name in aws_config.get("profile_name", ""):
-                config_path = os.path.expanduser("~/.aws/config")
-                if os.path.exists(config_path):
-                    import configparser
-                    config = configparser.ConfigParser()
-                    config.read(config_path)
-                    section = f"profile {profile_name}"
-                    if config.has_section(section) and config.has_option(section, "sso_start_url"):
-                        if hasattr(credentials, "token"):
-                            creds = credentials.get_frozen_credentials()
-                            if hasattr(creds, "expiry_time") and creds.expiry_time < datetime.now(timezone.utc):
-                                login_cmd = f"aws sso login --profile {profile_name}"
-                                error(f"AWS SSO session expired. Please run:\n  {login_cmd}")
-
-            return aws_config
-        except ClientError as e:
-            if is_raise_exception:
-                raise
-            error_code = e.response["Error"]["Code"]
-
-            if error_code == "ExpiredToken":
-                # Check if SSO to provide better error message
-                profile_to_check = aws_config.get("profile_name", profile_name)
-                if profile_to_check:
-                    config_path = os.path.expanduser("~/.aws/config")
-                    if os.path.exists(config_path):
-                        import configparser
-                        config = configparser.ConfigParser()
-                        config.read(config_path)
-                        section = f"profile {profile_to_check}"
-                        if config.has_section(section) and config.has_option(section, "sso_start_url"):
-                            login_cmd = f"aws sso login --profile {profile_to_check}"
-                            warn(f"AWS SSO session expired. Please run:\n  {login_cmd}")
-                            return aws_config
-                warn("AWS credentials have expired")
-            elif error_code == "InvalidClientTokenId":
-                warn("AWS credentials are invalid. Please reconfigure:\n  aws configure")
-            else:
-                warn(f"AWS API error: {error_code}")
-        except Exception as e:
-            if is_raise_exception:
-                raise
-            warn(f"AWS credential check failed: {e}")
-
         return aws_config
 
     def validate_auth(self) -> None:
-        profile = self.aws_config.get("profile_name", "default")
-        log(f"Authenticating with AWS (profile: {profile})...")
-        try:
-            session = self._get_session()
-            sts = session.client("sts")
-            sts.get_caller_identity()
-        except Exception as e:
-            error(f"AWS authentication failed (profile: {profile}): {e}")
+        check_aws_auth(self.aws_config.get("profile_name"))
 
     def _get_ec2_client(self):
         return self._get_session().client("ec2")
@@ -1114,6 +1030,31 @@ class AWSProvider:
 
         if dry_run:
             log("\nRun with --no-dry-run to actually delete resources")
+
+
+def check_aws_auth(profile: str | None = None) -> None:
+    """Validate AWS credentials, fail fast with clear error if expired or invalid.
+
+    :param profile: AWS profile name to check (uses default chain if None)
+    :raises SystemExit: If credentials are missing, expired, or invalid
+    """
+    aws_config = {}
+    if profile:
+        aws_config["profile_name"] = profile
+
+    try:
+        session = boto3.Session(**aws_config)
+        sts = session.client("sts")
+        sts.get_caller_identity()
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        if error_code in ("ExpiredToken", "ExpiredTokenException"):
+            login_cmd = f"aws sso login --profile {profile}" if profile else "aws sso login"
+            error(f"AWS credentials expired. Run:\n  {login_cmd}")
+        else:
+            error(f"AWS authentication failed ({error_code}): {e}")
+    except Exception as e:
+        error(f"AWS authentication failed: {e}")
 
 
 def get_provider(

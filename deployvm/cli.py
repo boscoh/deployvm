@@ -21,6 +21,7 @@ from .apps import FastAPIApp, NuxtApp
 from .providers import ProviderName, get_provider
 from .server import (
     add_app_to_instance,
+    check_instance_auth,
     check_instance_reachable,
     ensure_dns_matches,
     ensure_web_firewall,
@@ -348,6 +349,7 @@ def sync_nuxt(
             error(f"Instance file not found: {instance_file}\nCreate an instance first with: deploy-vm instance create {target}")
 
     instance = resolve_instance(target)
+    check_instance_auth(instance)
     user = instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
     ip = instance.get("ip")
@@ -505,6 +507,7 @@ def deploy_nuxt(
         )
 
     data = load_instance(name)
+    check_instance_auth(data)
 
     ip = data["ip"]
     provider_name = data.get("provider", "digitalocean")
@@ -590,6 +593,7 @@ def sync_fastapi(
             error(f"Instance file not found: {instance_file}\nCreate an instance first with: deploy-vm instance create {target}")
 
     instance = resolve_instance(target)
+    check_instance_auth(instance)
     user = instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
     ip = instance.get("ip")
@@ -740,6 +744,7 @@ def deploy_fastapi(
         )
 
     data = load_instance(name)
+    check_instance_auth(data)
 
     ip = data["ip"]
     ssh_user = get_ssh_user(data.get("provider", "digitalocean"))

@@ -7,6 +7,7 @@ from pathlib import Path
 from textwrap import dedent
 
 from .server import (
+    check_instance_auth,
     rsync,
     ssh,
     ssh_as_user,
@@ -78,7 +79,7 @@ def filter_aws_credentials_from_env(
         from .providers import AWSProvider
 
         # Get region from AWS config (may come from profile)
-        aws_config = AWSProvider.get_aws_config(is_raise_exception=False)
+        aws_config = AWSProvider.get_aws_config()
         region = aws_config.get("region_name")
 
         if region:
@@ -115,6 +116,7 @@ class BaseApp:
         self.ip = instance_data["ip"]
         self.provider_name = provider_name
         self.ssh_user = "deploy"
+        check_instance_auth(instance_data)
 
     def compute_source_hash(
         self, local_path: str, exclude: list[str] | None = None
