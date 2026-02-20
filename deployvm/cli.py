@@ -276,6 +276,35 @@ def verify_command(
     verify_instance(name, domain=domain, ssh_user=ssh_user)
 
 
+def _select_nginx_app(instance: dict, port: int | None) -> tuple[int, dict]:
+    """Select app entry from instance by port or index, returning resolved port and app data.
+
+    :param instance: Instance data dictionary
+    :param port: Explicit port to match against app entries (optional)
+    :return: (resolved_port, app_data) where app_data is matched app dict or {}
+    """
+    apps = instance.get("apps") or []
+
+    if not apps:
+        # Raw IP target with no app entries — use fallback behaviour
+        return port or 3000, {}
+
+    if port is not None:
+        matched = next((a for a in apps if a.get("port") == port), None)
+        if matched is None:
+            error(f"No app found with port {port}. Available ports: {[a.get('port') for a in apps]}")
+        return port, matched
+
+    if len(apps) == 1:
+        app_data = apps[0]
+        return app_data.get("port") or 3000, app_data
+
+    app_list = ", ".join(
+        f"{a.get('name', '?')} (port {a.get('port', '?')})" for a in apps
+    )
+    error(f"Multiple apps found: {app_list}. Use --port to specify which app to configure.")
+
+
 @nginx_app.command(name="ip")
 def nginx_ip_command(
     target: str,
@@ -293,7 +322,16 @@ def nginx_ip_command(
     """
     instance = resolve_instance(target)
     ip = instance["ip"]
-    resolved_port = port or (instance.get("apps") or [{}])[0].get("port") or 3000
+    resolved_port, app_data = _select_nginx_app(instance, port)
+
+    # Read static_dir from app entry as fallback
+    static_dir = static_dir or app_data.get("static_dir")
+
+    # Persist static_dir into the app entry for named instances
+    if static_dir and app_data and not is_valid_ip(target):
+        app_data["static_dir"] = static_dir
+        save_instance(target, instance)
+
     setup_nginx_ip(ip, port=resolved_port, static_dir=static_dir, ssh_user=ssh_user)
 
 
@@ -322,7 +360,16 @@ def nginx_ssl_command(
     """
     instance = resolve_instance(target)
     ip = instance["ip"]
-    resolved_port = port or (instance.get("apps") or [{}])[0].get("port") or 3000
+    resolved_port, app_data = _select_nginx_app(instance, port)
+
+    # Read static_dir from app entry as fallback
+    static_dir = static_dir or app_data.get("static_dir")
+
+    # Persist static_dir into the app entry for named instances
+    if static_dir and app_data and not is_valid_ip(target):
+        app_data["static_dir"] = static_dir
+        save_instance(target, instance)
+
     provider_name: ProviderName = provider or instance.get("provider", "digitalocean")
     aws_profile = instance.get("aws_profile") if provider_name == "aws" else None
     setup_nginx_ssl(
