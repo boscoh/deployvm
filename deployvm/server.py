@@ -616,6 +616,13 @@ def setup_nginx_ip(
     """Setup nginx for IP-only access (no SSL)."""
     ensure_web_firewall(ip, ssh_user=ssh_user)
 
+    # Remove any domain-based site configs from sites-enabled
+    ssh_script(
+        ip,
+        "sudo find /etc/nginx/sites-enabled/ -maxdepth 1 -type l ! -name default -delete 2>/dev/null || true",
+        user=ssh_user,
+    )
+
     server_block = generate_nginx_server_block(
         "_", port, static_dir, listen="80 default_server"
     )
