@@ -30,3 +30,8 @@ dev-dependencies = [
     "pytest>=8.0.0",
     "pytest-timeout>=2.3.0",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests requiring a real cloud instance",
+]
