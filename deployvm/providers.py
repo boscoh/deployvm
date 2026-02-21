@@ -1133,6 +1133,7 @@ class VultrProvider:
         self.provider_name: ProviderName = "vultr"
         self.region = region or "syd"
         self.os_id = int(os_image) if os_image else self.DEFAULT_OS_ID
+        self.os_image = str(self.os_id)  # satisfy Provider protocol
         self.vm_size = vm_size or "vc2-1c-1gb"
 
         if self.vm_size not in self.VM_SIZES:
