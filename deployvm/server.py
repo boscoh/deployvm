@@ -512,19 +512,30 @@ def setup_server(
     log("Server setup complete")
 
 
-def ensure_web_firewall(ip: str, ssh_user: str = "deploy"):
+def ensure_web_firewall(ip: str, ssh_user: str = "deploy", extra_port: int | None = None):
+    """Ensure firewall allows HTTP (80), HTTPS (443), and an optional extra port.
+
+    :param extra_port: Additional TCP port to open (e.g. custom outgoing_port)
+    """
     log("Checking firewall...")
     result = ssh(ip, "sudo ufw status", user=ssh_user)
     needs_80 = "80/tcp" not in result
     needs_443 = "443/tcp" not in result
+    needs_extra = (
+        extra_port is not None
+        and extra_port not in (80, 443)
+        and f"{extra_port}/tcp" not in result
+    )
 
-    if needs_80 or needs_443:
+    if needs_80 or needs_443 or needs_extra:
         log("Opening web ports in firewall...")
         cmds = []
         if needs_80:
             cmds.append("sudo ufw allow 80/tcp")
         if needs_443:
             cmds.append("sudo ufw allow 443/tcp")
+        if needs_extra:
+            cmds.append(f"sudo ufw allow {extra_port}/tcp")
         cmds.append("sudo ufw reload")
         ssh_script(ip, " && ".join(cmds), user=ssh_user)
         log("Firewall updated")
@@ -614,11 +625,16 @@ def setup_nginx_ip(
     ip: str,
     *,
     port: int = 3000,
+    outgoing_port: int = 80,
     static_dir: str | None = None,
     ssh_user: str = "deploy",
 ):
-    """Setup nginx for IP-only access (no SSL)."""
-    ensure_web_firewall(ip, ssh_user=ssh_user)
+    """Setup nginx for IP-only access (no SSL).
+
+    :param port: Internal application port to proxy to
+    :param outgoing_port: External port nginx listens on (default: 80)
+    """
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port)
 
     # Remove any domain-based site configs from sites-enabled
     ssh_script(
@@ -627,11 +643,12 @@ def setup_nginx_ip(
         user=ssh_user,
     )
 
+    listen_directive = f"{outgoing_port} default_server"
     server_block = generate_nginx_server_block(
-        "_", port, static_dir, listen="80 default_server"
+        "_", port, static_dir, listen=listen_directive
     )
 
-    log(f"Setting up nginx for IP access on '{ip}'...")
+    log(f"Setting up nginx for IP access on '{ip}' port {outgoing_port}...")
     ssh_script(
         ip, "sudo apt-get update && sudo apt-get install -y nginx", user=ssh_user
     )
@@ -645,7 +662,8 @@ def setup_nginx_ip(
     )
 
     verify_http(ip)
-    log(f"Nginx configured! 'http://{ip}'")
+    port_suffix = f":{outgoing_port}" if outgoing_port != 80 else ""
+    log(f"Nginx configured! 'http://{ip}{port_suffix}'")
 
 
 def setup_nginx_ssl(
@@ -654,14 +672,21 @@ def setup_nginx_ssl(
     email: str,
     *,
     port: int = 3000,
+    outgoing_port: int = 443,
     static_dir: str | None = None,
     skip_dns: bool = False,
     ssh_user: str = "deploy",
     provider_name: ProviderName = "digitalocean",
     aws_profile: str | None = None,
 ):
-    """Setup nginx and SSL certificate."""
-    ensure_web_firewall(ip, ssh_user=ssh_user)
+    """Setup nginx and SSL certificate.
+
+    :param port: Internal application port to proxy to
+    :param outgoing_port: External HTTPS port nginx listens on (default: 443).
+        Certbot always validates via port 443; if a different port is given, nginx
+        is configured to also listen on that port after the certificate is issued.
+    """
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port)
     if not skip_dns:
         ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
 
@@ -721,7 +746,22 @@ def setup_nginx_ssl(
         sudo systemctl enable --now certbot.timer
     """).strip()
     ssh_script(ip, ssl_script, user=ssh_user)
-    log(f"SSL configured! 'https://{domain}'")
+
+    # Certbot always configures 443. If a custom port is requested, add an
+    # additional listen directive to the SSL server block.
+    if outgoing_port != 443:
+        log(f"Adding listen directive for custom SSL port {outgoing_port}...")
+        add_listen_script = dedent(f"""
+            set -e
+            CONFIG="/etc/nginx/sites-available/{domain}"
+            # Insert 'listen <port> ssl;' after the existing 'listen 443 ssl;' line
+            sudo sed -i '/listen 443 ssl;/a\\    listen {outgoing_port} ssl;' "$CONFIG"
+            sudo nginx -t && sudo systemctl reload nginx
+        """).strip()
+        ssh_script(ip, add_listen_script, user=ssh_user)
+
+    port_suffix = f":{outgoing_port}" if outgoing_port != 443 else ""
+    log(f"SSL configured! 'https://{domain}{port_suffix}'")
 
 
 def verify_instance(

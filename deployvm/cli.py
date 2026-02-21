@@ -310,6 +310,7 @@ def nginx_ip_command(
     target: str,
     *,
     port: int | None = None,
+    outgoing_port: int = 80,
     static_dir: str | None = None,
     ssh_user: str = "deploy",
 ):
@@ -317,6 +318,7 @@ def nginx_ip_command(
 
     :param target: Instance name or IP address
     :param port: Application port (default: read from instance, fallback 3000)
+    :param outgoing_port: External port nginx listens on (default: 80)
     :param static_dir: Static files directory to serve directly
     :param ssh_user: SSH user for remote connection
     """
@@ -332,7 +334,7 @@ def nginx_ip_command(
         app_data["static_dir"] = static_dir
         save_instance(target, instance)
 
-    setup_nginx_ip(ip, port=resolved_port, static_dir=static_dir, ssh_user=ssh_user)
+    setup_nginx_ip(ip, port=resolved_port, outgoing_port=outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
 
 
 @nginx_app.command(name="ssl")
@@ -342,6 +344,7 @@ def nginx_ssl_command(
     email: str,
     *,
     port: int | None = None,
+    outgoing_port: int = 443,
     static_dir: str | None = None,
     skip_dns: bool = False,
     ssh_user: str = "deploy",
@@ -353,6 +356,7 @@ def nginx_ssl_command(
     :param domain: Domain name for SSL certificate
     :param email: Email for Let's Encrypt registration
     :param port: Application port (default: read from instance, fallback 3000)
+    :param outgoing_port: External HTTPS port nginx listens on (default: 443)
     :param static_dir: Static files directory to serve directly
     :param skip_dns: Skip DNS validation check
     :param ssh_user: SSH user for remote connection
@@ -377,6 +381,7 @@ def nginx_ssl_command(
         domain,
         email,
         port=resolved_port,
+        outgoing_port=outgoing_port,
         static_dir=static_dir,
         skip_dns=skip_dns,
         ssh_user=ssh_user,
@@ -520,6 +525,7 @@ def deploy_nuxt(
     email: str | None = None,
     user: str = "deploy",
     port: int = 3000,
+    outgoing_port: int | None = None,
     app_name: str = "nuxt",
     provider: ProviderName = "digitalocean",
     region: str = "syd1",
@@ -542,6 +548,7 @@ def deploy_nuxt(
     :param email: Email for Let's Encrypt SSL certificate (required unless --no-ssl)
     :param user: Remote user to run the app as (default: deploy)
     :param port: Application port (default: 3000)
+    :param outgoing_port: External port nginx listens on (default: 80 for --no-ssl, 443 for SSL)
     :param app_name: Name of the app (default: nuxt)
     :param provider: Cloud provider (aws or digitalocean, default: digitalocean)
     :param region: Cloud provider region (default: syd1)
@@ -555,6 +562,8 @@ def deploy_nuxt(
     """
     if not no_ssl and (not domain or not email):
         error("--domain and --email are required unless --no-ssl is set")
+
+    resolved_outgoing_port = outgoing_port if outgoing_port is not None else (80 if no_ssl else 443)
 
     instance_file = Path(f"{name}.instance.json")
 
@@ -586,7 +595,7 @@ def deploy_nuxt(
 
     add_app_to_instance(data, app_name, "nuxt", port,
         source=source, domain=domain, node_version=node_version, local_build=local_build,
-        email=email, outgoing_port=80 if no_ssl else 443)
+        email=email, outgoing_port=resolved_outgoing_port)
     save_instance(name, data)
 
     log(f"Deploying '{name}' to '{ip}'")
@@ -599,20 +608,21 @@ def deploy_nuxt(
         node_version=node_version,
     )
 
-    ensure_web_firewall(ip, ssh_user=nuxt_ssh_user)
+    ensure_web_firewall(ip, ssh_user=nuxt_ssh_user, extra_port=resolved_outgoing_port)
     aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
     if not no_ssl:
         ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
     nuxt_static_dir = f"/home/{user}/{app_name}/.output/public"
     if no_ssl:
-        setup_nginx_ip(ip, port=port, static_dir=nuxt_static_dir, ssh_user=nuxt_ssh_user)
+        setup_nginx_ip(ip, port=port, outgoing_port=resolved_outgoing_port, static_dir=nuxt_static_dir, ssh_user=nuxt_ssh_user)
     else:
         setup_nginx_ssl(
             ip,
             domain,
             email,
             port=port,
+            outgoing_port=resolved_outgoing_port,
             static_dir=nuxt_static_dir,
             ssh_user=nuxt_ssh_user,
             provider_name=data["provider"],
@@ -626,10 +636,11 @@ def deploy_nuxt(
         warn(f"App health check returned HTTP status: {result.strip()}")
 
     print("=" * 50)
+    port_suffix = f":{resolved_outgoing_port}" if (no_ssl and resolved_outgoing_port != 80) or (not no_ssl and resolved_outgoing_port != 443) else ""
     if no_ssl:
-        log(f"Done! http://{ip}")
+        log(f"Done! http://{ip}{port_suffix}")
     else:
-        log(f"Done! https://{domain}")
+        log(f"Done! https://{domain}{port_suffix}")
 
 
 @fastapi_app.command(name="sync")
@@ -760,6 +771,7 @@ def deploy_fastapi(
     email: str | None = None,
     user: str = "deploy",
     port: int = 8000,
+    outgoing_port: int | None = None,
     app_name: str = "fastapi",
     static_subdir: str | None = None,
     provider: ProviderName | None = None,
@@ -782,6 +794,7 @@ def deploy_fastapi(
     :param email: Email for Let's Encrypt SSL certificate (required unless --no-ssl)
     :param user: Remote user to run the app as (default: deploy)
     :param port: Port number for the app (default: 8000)
+    :param outgoing_port: External port nginx listens on (default: 80 for --no-ssl, 443 for SSL)
     :param app_name: Name of the app (default: fastapi)
     :param static_subdir: Subdirectory for static files to serve directly via nginx
     :param provider: Cloud provider (aws or digitalocean, default: digitalocean)
@@ -794,6 +807,8 @@ def deploy_fastapi(
     """
     if not no_ssl and (not domain or not email):
         error("--domain and --email are required unless --no-ssl is set")
+
+    resolved_outgoing_port = outgoing_port if outgoing_port is not None else (80 if no_ssl else 443)
 
     instance_file = Path(f"{name}.instance.json")
 
@@ -823,7 +838,7 @@ def deploy_fastapi(
 
     add_app_to_instance(data, app_name, "fastapi", port,
         source=source, command=command, domain=domain, static_subdir=static_subdir,
-        email=email, outgoing_port=80 if no_ssl else 443)
+        email=email, outgoing_port=resolved_outgoing_port)
     save_instance(name, data)
 
     log(f"Deploying '{name}' to '{ip}'")
@@ -835,20 +850,21 @@ def deploy_fastapi(
         command=command,
     )
 
-    ensure_web_firewall(ip, ssh_user=ssh_user)
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=resolved_outgoing_port)
     aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
     if not no_ssl:
         ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
     static_dir = f"/home/{user}/{app_name}/{static_subdir}" if static_subdir else None
     if no_ssl:
-        setup_nginx_ip(ip, port=port, static_dir=static_dir, ssh_user=ssh_user)
+        setup_nginx_ip(ip, port=port, outgoing_port=resolved_outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
     else:
         setup_nginx_ssl(
             ip,
             domain,
             email,
             port=port,
+            outgoing_port=resolved_outgoing_port,
             static_dir=static_dir,
             ssh_user=ssh_user,
             provider_name=data["provider"],
@@ -862,10 +878,11 @@ def deploy_fastapi(
         warn(f"App health check returned HTTP status: {result.strip()}")
 
     print("=" * 50)
+    port_suffix = f":{resolved_outgoing_port}" if (no_ssl and resolved_outgoing_port != 80) or (not no_ssl and resolved_outgoing_port != 443) else ""
     if no_ssl:
-        log(f"Done! http://{ip}")
+        log(f"Done! http://{ip}{port_suffix}")
     else:
-        log(f"Done! https://{domain}")
+        log(f"Done! https://{domain}{port_suffix}")
 
 
 @dns_app.command(name="nameservers")
