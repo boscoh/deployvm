@@ -334,7 +334,8 @@ def nginx_ip_command(
         app_data["static_dir"] = static_dir
         save_instance(target, instance)
 
-    setup_nginx_ip(ip, port=resolved_port, outgoing_port=outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
+    app_name = app_data.get("name", "default") if app_data else "default"
+    setup_nginx_ip(ip, app_name=app_name, port=resolved_port, outgoing_port=outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
 
 
 @nginx_app.command(name="ssl")
@@ -615,7 +616,7 @@ def deploy_nuxt(
 
     nuxt_static_dir = f"/home/{user}/{app_name}/.output/public"
     if no_ssl:
-        setup_nginx_ip(ip, port=port, outgoing_port=resolved_outgoing_port, static_dir=nuxt_static_dir, ssh_user=nuxt_ssh_user)
+        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=nuxt_static_dir, ssh_user=nuxt_ssh_user)
     else:
         setup_nginx_ssl(
             ip,
@@ -857,7 +858,7 @@ def deploy_fastapi(
 
     static_dir = f"/home/{user}/{app_name}/{static_subdir}" if static_subdir else None
     if no_ssl:
-        setup_nginx_ip(ip, port=port, outgoing_port=resolved_outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
+        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
     else:
         setup_nginx_ssl(
             ip,

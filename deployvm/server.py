@@ -399,10 +399,11 @@ def wait_for_ssh(ip: str, user: str = "deploy", timeout: int = SSH_TIMEOUT):
     error(f"SSH timeout after '{timeout}s'")
 
 
-def verify_http(ip: str, domain: str | None = None) -> bool:
+def verify_http(ip: str, domain: str | None = None, port: int = 80) -> bool:
     # Use domain URL when available — nginx server_name won't match raw IP requests
-    url = f"http://{domain}/" if domain else f"http://{ip}/"
-    log(f"Verifying HTTP connectivity on port 80 via '{url}'...")
+    base = domain if domain else ip
+    url = f"http://{base}/" if port == 80 else f"http://{base}:{port}/"
+    log(f"Verifying HTTP connectivity on port {port} via '{url}'...")
     for i in range(HTTP_VERIFY_RETRIES):
         try:
             req = urllib.request.Request(url)
@@ -624,6 +625,7 @@ def generate_nginx_server_block(
 def setup_nginx_ip(
     ip: str,
     *,
+    app_name: str = "default",
     port: int = 3000,
     outgoing_port: int = 80,
     static_dir: str | None = None,
@@ -631,37 +633,32 @@ def setup_nginx_ip(
 ):
     """Setup nginx for IP-only access (no SSL).
 
+    :param app_name: App name used as nginx config filename (default: default)
     :param port: Internal application port to proxy to
     :param outgoing_port: External port nginx listens on (default: 80)
     """
     ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port)
 
-    # Remove any domain-based site configs from sites-enabled
-    ssh_script(
-        ip,
-        "sudo find /etc/nginx/sites-enabled/ -maxdepth 1 -type l ! -name default -delete 2>/dev/null || true",
-        user=ssh_user,
-    )
-
-    listen_directive = f"{outgoing_port} default_server"
+    # Use default_server only for the primary app on port 80
+    listen_directive = f"{outgoing_port} default_server" if app_name == "default" else str(outgoing_port)
     server_block = generate_nginx_server_block(
         "_", port, static_dir, listen=listen_directive
     )
 
-    log(f"Setting up nginx for IP access on '{ip}' port {outgoing_port}...")
+    log(f"Setting up nginx for IP access on '{ip}' port {outgoing_port} (app: {app_name})...")
     ssh_script(
         ip, "sudo apt-get update && sudo apt-get install -y nginx", user=ssh_user
     )
     ssh_write_file(
-        ip, "/etc/nginx/sites-available/default", server_block, user=ssh_user
+        ip, f"/etc/nginx/sites-available/{app_name}", server_block, user=ssh_user
     )
     ssh_script(
         ip,
-        "sudo ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/ && sudo nginx -t && sudo systemctl reload nginx",
+        f"sudo ln -sf /etc/nginx/sites-available/{app_name} /etc/nginx/sites-enabled/{app_name} && sudo nginx -t && sudo systemctl reload nginx",
         user=ssh_user,
     )
 
-    verify_http(ip)
+    verify_http(ip, port=outgoing_port)
     port_suffix = f":{outgoing_port}" if outgoing_port != 80 else ""
     log(f"Nginx configured! 'http://{ip}{port_suffix}'")
 
