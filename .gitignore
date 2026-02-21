@@ -49,8 +49,9 @@ arx/
 # Deployment scripts
 tspot*
 
-# UV lock file
+# UV lock file (except test fixtures)
 uv.lock
+!tests/fixtures/**/uv.lock
 
 # OS
 .DS_Store
