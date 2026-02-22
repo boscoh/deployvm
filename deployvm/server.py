@@ -197,12 +197,23 @@ def load_instance(name: str) -> dict:
         error(f"Instance file not found: '{path}'")
     data = json.loads(path.read_text())
     if "apps" not in data and "app_name" in data:
-        app_data = {"name": data["app_name"], "type": data.get("app_type", "nuxt")}
+        app_data = {"name": data["app_name"], "type": data.get("app_type", "npm")}
         if "port" in data:
             app_data["port"] = data["port"]
         data["apps"] = [app_data]
         data.pop("app_name", None)
         data.pop("app_type", None)
+        save_instance(name, data)
+    # Migrate legacy app types
+    changed = False
+    for app in data.get("apps", []):
+        if app.get("type") == "fastapi":
+            app["type"] = "uv"
+            changed = True
+        elif app.get("type") == "nuxt":
+            app["type"] = "npm"
+            changed = True
+    if changed:
         save_instance(name, data)
     return data
 
@@ -221,7 +232,7 @@ def get_instance_apps(instance: dict) -> list[dict]:
         return instance["apps"]
     if "app_name" in instance:
         return [
-            {"name": instance["app_name"], "type": instance.get("app_type", "nuxt")}
+            {"name": instance["app_name"], "type": instance.get("app_type", "npm")}
         ]
     return []
 
@@ -233,7 +244,7 @@ def add_app_to_instance(
 
     :param instance: Instance data dictionary to modify
     :param app_name: Application name
-    :param app_type: App type (nuxt or fastapi)
+    :param app_type: App type (npm or uv)
     :param port: Port number (optional)
     :param extra: Additional fields to store on the app (source, command, domain, etc.)
     """
@@ -416,7 +427,7 @@ def verify_http(ip: str, domain: str | None = None, port: int = 80) -> bool:
             pass
         warn(f"Cannot connect to '{url}' ({i + 1}/{HTTP_VERIFY_RETRIES})")
         time.sleep(HTTP_VERIFY_DELAY)
-    error(f"Cannot connect to '{url}' on port 80. Check UFW: ssh deploy@'{ip}' 'sudo ufw status'")
+    error(f"Cannot connect to '{url}' on port {port}. Check UFW: ssh deploy@'{ip}' 'sudo ufw status'")
 
 
 def setup_firewall(ip: str, ssh_user: str = "root"):
@@ -484,6 +495,8 @@ def create_user(ip: str, user: str = "deploy", ssh_user: str = "root"):
             sudo chmod 600 /home/{user}/.ssh/authorized_keys
             echo "User {user} created"
         fi
+        # Allow nginx (www-data) to traverse the home directory for static file serving
+        sudo chmod o+x /home/{user}
     """).strip()
     ssh_script(ip, script, user=ssh_user)
 
@@ -513,10 +526,19 @@ def setup_server(
     log("Server setup complete")
 
 
-def ensure_web_firewall(ip: str, ssh_user: str = "deploy", extra_port: int | None = None):
+def ensure_web_firewall(
+    ip: str,
+    ssh_user: str = "deploy",
+    extra_port: int | None = None,
+    provider=None,
+):
     """Ensure firewall allows HTTP (80), HTTPS (443), and an optional extra port.
 
+    Updates both the OS-level UFW firewall and, when a provider is given,
+    the cloud-level firewall (AWS security group, Vultr firewall group).
+
     :param extra_port: Additional TCP port to open (e.g. custom outgoing_port)
+    :param provider: Cloud provider instance for updating cloud-level firewall rules
     """
     log("Checking firewall...")
     result = ssh(ip, "sudo ufw status", user=ssh_user)
@@ -542,6 +564,9 @@ def ensure_web_firewall(ip: str, ssh_user: str = "deploy", extra_port: int | Non
         log("Firewall updated")
     else:
         log("Firewall OK")
+
+    if provider is not None and extra_port is not None and extra_port not in (80, 443):
+        provider.open_firewall_port(extra_port)
 
 
 def ensure_dns_matches(
@@ -598,7 +623,7 @@ def generate_nginx_server_block(
         location_block = dedent(f"""
             location / {{
                 root {static_dir};
-                try_files $uri $uri/ @backend;
+                try_files $uri @backend;
             }}
 
             location @backend {{
@@ -630,14 +655,16 @@ def setup_nginx_ip(
     outgoing_port: int = 80,
     static_dir: str | None = None,
     ssh_user: str = "deploy",
+    provider=None,
 ):
     """Setup nginx for IP-only access (no SSL).
 
     :param app_name: App name used as nginx config filename (default: default)
     :param port: Internal application port to proxy to
     :param outgoing_port: External port nginx listens on (default: 80)
+    :param provider: Cloud provider instance for updating cloud-level firewall rules
     """
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port)
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider)
 
     # Use default_server only for the primary app on port 80
     listen_directive = f"{outgoing_port} default_server" if app_name == "default" else str(outgoing_port)
@@ -675,6 +702,7 @@ def setup_nginx_ssl(
     ssh_user: str = "deploy",
     provider_name: ProviderName = "digitalocean",
     aws_profile: str | None = None,
+    provider=None,
 ):
     """Setup nginx and SSL certificate.
 
@@ -682,8 +710,9 @@ def setup_nginx_ssl(
     :param outgoing_port: External HTTPS port nginx listens on (default: 443).
         Certbot always validates via port 443; if a different port is given, nginx
         is configured to also listen on that port after the certificate is issued.
+    :param provider: Cloud provider instance for updating cloud-level firewall rules
     """
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port)
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider)
     if not skip_dns:
         ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
 

@@ -8,7 +8,7 @@ Usage: uv run deployvm <noun> <verb> [options]
 Examples:
     uv run deployvm instance create myapp
     uv run deployvm instance list
-    uv run deployvm fastapi deploy myapp ./src "uv run uvicorn app:app --port 8000"
+    uv run deployvm uv deploy myapp ./src "uv run uvicorn app:app --port 8000"
     uv run deployvm nginx ssl myapp example.com user@example.com
 """
 
@@ -17,7 +17,7 @@ from pathlib import Path
 import cyclopts
 from rich import print
 
-from .apps import FastAPIApp, NuxtApp
+from .apps import UVApp, NpmApp
 from .providers import ProviderName, get_provider
 from .server import (
     add_app_to_instance,
@@ -46,16 +46,16 @@ app = cyclopts.App(
 
 instance_app = cyclopts.App(name="instance", help="Manage cloud instances", sort_key=1)
 nginx_app = cyclopts.App(name="nginx", help="Configure nginx reverse proxy", sort_key=2)
-nuxt_app = cyclopts.App(name="nuxt", help="Deploy and manage Nuxt apps", sort_key=3)
-fastapi_app = cyclopts.App(
-    name="fastapi", help="Deploy and manage FastAPI apps", sort_key=4
+npm_app = cyclopts.App(name="npm", help="Deploy and manage npm apps", sort_key=3)
+uv_app = cyclopts.App(
+    name="uv", help="Deploy and manage uv Python apps", sort_key=4
 )
 dns_app = cyclopts.App(name="dns", help="Manage DNS records", sort_key=5)
 
 app.command(instance_app)
 app.command(nginx_app)
-app.command(nuxt_app)
-app.command(fastapi_app)
+app.command(npm_app)
+app.command(uv_app)
 app.command(dns_app)
 
 
@@ -335,7 +335,8 @@ def nginx_ip_command(
         save_instance(target, instance)
 
     app_name = app_data.get("name", "default") if app_data else "default"
-    setup_nginx_ip(ip, app_name=app_name, port=resolved_port, outgoing_port=outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
+    provider = get_provider(instance.get("provider"), aws_profile=instance.get("aws_profile"))
+    setup_nginx_ip(ip, app_name=app_name, port=resolved_port, outgoing_port=outgoing_port, static_dir=static_dir, ssh_user=ssh_user, provider=provider)
 
 
 @nginx_app.command(name="ssl")
@@ -391,8 +392,8 @@ def nginx_ssl_command(
     )
 
 
-@nuxt_app.command(name="sync")
-def sync_nuxt(
+@npm_app.command(name="sync")
+def sync_npm(
     target: str,
     source: str,
     *,
@@ -400,10 +401,13 @@ def sync_nuxt(
     local_build: bool = True,
     force: bool = False,
     node_version: int = 20,
+    start_script: str = ".output/server/index.mjs",
+    build_command: str = "npm run build",
+    dist_dir: str = ".output",
 ):
-    """Sync Nuxt app to existing server.
+    """Sync npm app to existing server.
 
-    Deploys the Nuxt application to an already-running instance by syncing files,
+    Deploys the npm application to an already-running instance by syncing files,
     building the app, and restarting PM2. Does not create instances or configure nginx.
 
     :param target: Instance name or IP address
@@ -412,6 +416,9 @@ def sync_nuxt(
     :param local_build: Build locally instead of on server
     :param force: Force rebuild even if source unchanged
     :param node_version: Node.js version to use (default: 20)
+    :param start_script: Script or file PM2 runs (default: .output/server/index.mjs)
+    :param build_command: Build command to run (default: npm run build)
+    :param dist_dir: Build output directory excluded from upload (default: .output)
     """
     # Check if instance file exists (unless target is an IP address)
     if not is_valid_ip(target):
@@ -431,31 +438,34 @@ def sync_nuxt(
     if not check_instance_reachable(ip, ssh_user):
         error(f"Instance '{ip}' is not reachable via SSH. Please verify the instance is running and SSH access is configured.")
 
-    apps = [a for a in get_instance_apps(instance) if a["type"] == "nuxt"]
-    fallback = target if not is_valid_ip(target) else "nuxt"
-    app_name = resolve_app_name(apps, "Nuxt", app_name, fallback)
+    apps = [a for a in get_instance_apps(instance) if a["type"] == "npm"]
+    fallback = target if not is_valid_ip(target) else "npm"
+    app_name = resolve_app_name(apps, "npm", app_name, fallback)
     app_data = next((a for a in apps if a["name"] == app_name), {})
     port = app_data.get("port", 3000)
 
-    nuxt = NuxtApp(
+    npm_inst = NpmApp(
         instance,
         provider,
         user=user,
         app_name=app_name,
         port=port,
         node_version=node_version,
+        start_script=start_script,
+        build_command=build_command,
+        dist_dir=dist_dir,
     )
-    nuxt.sync(source, local_build=local_build, force=force)
+    npm_inst.sync(source, local_build=local_build, force=force)
 
 
-@nuxt_app.command(name="restart")
+@npm_app.command(name="restart")
 def restart_pm2(
     target: str,
     *,
     user: str | None = None,
     app_name: str | None = None,
 ):
-    """Restart Nuxt app using PM2.
+    """Restart npm app using PM2.
 
     :param target: Instance name or IP address
     :param user: App user (reads from instance.json if not specified)
@@ -465,18 +475,18 @@ def restart_pm2(
     user = user or instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
 
-    apps = [app for app in get_instance_apps(instance) if app["type"] == "nuxt"]
+    apps = [app for app in get_instance_apps(instance) if app["type"] == "npm"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "nuxt"
-    app_name = resolve_app_name(apps, "Nuxt", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "npm"
+    app_name = resolve_app_name(apps, "npm", app_name, fallback)
 
-    nuxt = NuxtApp(instance, provider, user=user, app_name=app_name)
-    nuxt.restart()
+    npm_inst = NpmApp(instance, provider, user=user, app_name=app_name)
+    npm_inst.restart()
 
 
-@nuxt_app.command(name="status")
+@npm_app.command(name="status")
 def show_pm2_status(target: str, *, user: str | None = None):
-    """Show PM2 status for Nuxt apps.
+    """Show PM2 status for npm apps.
 
     :param target: Instance name or IP address
     :param user: App user (reads from instance.json if not specified)
@@ -485,11 +495,11 @@ def show_pm2_status(target: str, *, user: str | None = None):
     user = user or instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
 
-    nuxt = NuxtApp(instance, provider, user=user)
-    print(nuxt.status())
+    npm_inst = NpmApp(instance, provider, user=user)
+    print(npm_inst.status())
 
 
-@nuxt_app.command(name="logs")
+@npm_app.command(name="logs")
 def show_pm2_logs(
     target: str,
     *,
@@ -497,7 +507,7 @@ def show_pm2_logs(
     lines: int = 50,
     app_name: str | None = None,
 ):
-    """View PM2 logs.
+    """View PM2 logs for npm apps.
 
     :param target: Server IP address or instance name (loads from <name>.instance.json)
     :param user: App user (reads from instance.json if not specified)
@@ -508,17 +518,17 @@ def show_pm2_logs(
     user = user or instance.get("user", "deploy")
     provider = instance.get("provider", "digitalocean")
 
-    apps = [app for app in get_instance_apps(instance) if app["type"] == "nuxt"]
+    apps = [app for app in get_instance_apps(instance) if app["type"] == "npm"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "nuxt"
-    app_name = resolve_app_name(apps, "Nuxt", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "npm"
+    app_name = resolve_app_name(apps, "npm", app_name, fallback)
 
-    nuxt = NuxtApp(instance, provider, user=user, app_name=app_name)
-    print(nuxt.logs(lines))
+    npm_inst = NpmApp(instance, provider, user=user, app_name=app_name)
+    print(npm_inst.logs(lines))
 
 
-@nuxt_app.command(name="deploy")
-def deploy_nuxt(
+@npm_app.command(name="deploy")
+def deploy_npm(
     name: str,
     source: str,
     *,
@@ -527,7 +537,7 @@ def deploy_nuxt(
     user: str = "deploy",
     port: int = 3000,
     outgoing_port: int | None = None,
-    app_name: str = "nuxt",
+    app_name: str = "npm",
     provider: ProviderName = "digitalocean",
     region: str = "syd1",
     vm_size: str = "s-1vcpu-1gb",
@@ -537,8 +547,12 @@ def deploy_nuxt(
     local_build: bool = True,
     no_ssl: bool = False,
     iam_role: str | None = None,
+    start_script: str = ".output/server/index.mjs",
+    build_command: str = "npm run build",
+    dist_dir: str = ".output",
+    static_subdir: str | None = None,
 ):
-    """Deploy Nuxt app with full infrastructure setup.
+    """Deploy npm app with full infrastructure setup.
 
     Creates a new cloud instance (if needed), sets up the server, deploys the app,
     and configures nginx with SSL. This is the complete deployment solution.
@@ -550,7 +564,7 @@ def deploy_nuxt(
     :param user: Remote user to run the app as (default: deploy)
     :param port: Application port (default: 3000)
     :param outgoing_port: External port nginx listens on (default: 80 for --no-ssl, 443 for SSL)
-    :param app_name: Name of the app (default: nuxt)
+    :param app_name: Name of the app (default: npm)
     :param provider: Cloud provider (aws or digitalocean, default: digitalocean)
     :param region: Cloud provider region (default: syd1)
     :param vm_size: Instance size (AWS: t3.micro, t3.small, etc. | DO: s-1vcpu-1gb, s-2vcpu-2gb, etc.)
@@ -560,6 +574,12 @@ def deploy_nuxt(
     :param local_build: Build locally instead of on server
     :param no_ssl: Skip SSL/domain setup, use IP-only access
     :param iam_role: AWS only: IAM role name for instance profile (default: deploy-vm-bedrock)
+    :param start_script: Script or file PM2 runs, or "npm run <cmd>" (default: .output/server/index.mjs)
+    :param build_command: Build command to run (default: npm run build)
+    :param dist_dir: Build output directory excluded from upload (default: .output)
+    :param static_subdir: Path within app dir for nginx to serve static files directly.
+        Defaults to {dist_dir}/public (Nuxt). Use {dist_dir}/client for SvelteKit/Remix,
+        or {dist_dir} for a plain Vite app. Pass empty string to disable static serving.
     """
     if not no_ssl and (not domain or not email):
         error("--domain and --email are required unless --no-ssl is set")
@@ -586,37 +606,43 @@ def deploy_nuxt(
 
     ip = data["ip"]
     provider_name = data.get("provider", "digitalocean")
-    nuxt_ssh_user = get_ssh_user(provider_name)
+    npm_ssh_user = get_ssh_user(provider_name)
 
-    if not check_instance_reachable(ip, nuxt_ssh_user):
+    if not check_instance_reachable(ip, npm_ssh_user):
         error(f"Instance '{name}' at '{ip}' is not reachable via SSH. Verify the instance exists and is running.")
 
     if "user" not in data or data["user"] != user:
         data["user"] = user
 
-    add_app_to_instance(data, app_name, "nuxt", port,
+    add_app_to_instance(data, app_name, "npm", port,
         source=source, domain=domain, node_version=node_version, local_build=local_build,
-        email=email, outgoing_port=resolved_outgoing_port)
+        start_script=start_script, build_command=build_command, dist_dir=dist_dir,
+        static_subdir=static_subdir, email=email, outgoing_port=resolved_outgoing_port)
     save_instance(name, data)
 
     log(f"Deploying '{name}' to '{ip}'")
     print("=" * 50)
 
-    sync_nuxt(
+    sync_npm(
         name,
         source,
         local_build=local_build,
         node_version=node_version,
+        start_script=start_script,
+        build_command=build_command,
+        dist_dir=dist_dir,
     )
 
-    ensure_web_firewall(ip, ssh_user=nuxt_ssh_user, extra_port=resolved_outgoing_port)
     aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
+    provider = get_provider(data["provider"], aws_profile=aws_profile)
+    ensure_web_firewall(ip, ssh_user=npm_ssh_user, extra_port=resolved_outgoing_port, provider=provider)
     if not no_ssl:
         ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
-    nuxt_static_dir = f"/home/{user}/{app_name}/.output/public"
+    _static_subdir = static_subdir if static_subdir is not None else f"{dist_dir}/public"
+    npm_static_dir = f"/home/{user}/{app_name}/{_static_subdir}" if _static_subdir else None
     if no_ssl:
-        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=nuxt_static_dir, ssh_user=nuxt_ssh_user)
+        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=npm_static_dir, ssh_user=npm_ssh_user, provider=provider)
     else:
         setup_nginx_ssl(
             ip,
@@ -624,15 +650,16 @@ def deploy_nuxt(
             email,
             port=port,
             outgoing_port=resolved_outgoing_port,
-            static_dir=nuxt_static_dir,
-            ssh_user=nuxt_ssh_user,
+            static_dir=npm_static_dir,
+            ssh_user=npm_ssh_user,
             provider_name=data["provider"],
             aws_profile=aws_profile,
+            provider=provider,
         )
 
     log("Verifying deployment...")
     verify_script = f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{port}"
-    result = ssh(ip, verify_script, user=nuxt_ssh_user)
+    result = ssh(ip, verify_script, user=npm_ssh_user)
     if "200" not in result:
         warn(f"App health check returned HTTP status: {result.strip()}")
 
@@ -644,8 +671,8 @@ def deploy_nuxt(
         log(f"Done! https://{domain}{port_suffix}")
 
 
-@fastapi_app.command(name="sync")
-def sync_fastapi(
+@uv_app.command(name="sync")
+def sync_uv(
     target: str,
     source: str,
     command: str,
@@ -653,9 +680,9 @@ def sync_fastapi(
     app_name: str | None = None,
     force: bool = False,
 ) -> bool:
-    """Sync FastAPI app to existing server.
+    """Sync uv app to existing server.
 
-    Deploys the FastAPI application to an already-running instance by syncing files,
+    Deploys the uv application to an already-running instance by syncing files,
     installing dependencies, and restarting supervisord. Does not create instances or configure nginx.
 
     :param target: Instance name or path to .instance.json file
@@ -683,13 +710,13 @@ def sync_fastapi(
     if not check_instance_reachable(ip, ssh_user):
         error(f"Instance '{ip}' is not reachable via SSH. Please verify the instance is running and SSH access is configured.")
 
-    apps = [a for a in get_instance_apps(instance) if a["type"] == "fastapi"]
-    fallback = target if not is_valid_ip(target) else "fastapi"
-    app_name = resolve_app_name(apps, "FastAPI", app_name, fallback)
+    apps = [a for a in get_instance_apps(instance) if a["type"] == "uv"]
+    fallback = target if not is_valid_ip(target) else "uv"
+    app_name = resolve_app_name(apps, "uv", app_name, fallback)
     app_data = next((a for a in apps if a["name"] == app_name), {})
     port = app_data.get("port", 8000)
 
-    fastapi = FastAPIApp(
+    uv_inst = UVApp(
         instance,
         provider,
         user=user,
@@ -697,14 +724,14 @@ def sync_fastapi(
         port=port,
         command=command,
     )
-    return fastapi.sync(source, force=force)
+    return uv_inst.sync(source, force=force)
 
 
-@fastapi_app.command(name="restart")
+@uv_app.command(name="restart")
 def restart_supervisor(
     target: str, *, app_name: str | None = None
 ):
-    """Restart FastAPI app using supervisord.
+    """Restart uv app using supervisord.
 
     :param target: Instance name or IP address
     :param app_name: App name (required if multiple apps exist on instance)
@@ -712,19 +739,19 @@ def restart_supervisor(
     instance = resolve_instance(target)
     provider = instance.get("provider", "digitalocean")
 
-    apps = [app for app in get_instance_apps(instance) if app["type"] == "fastapi"]
+    apps = [app for app in get_instance_apps(instance) if app["type"] == "uv"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "fastapi"
-    app_name = resolve_app_name(apps, "FastAPI", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "uv"
+    app_name = resolve_app_name(apps, "uv", app_name, fallback)
 
     user = instance.get("user", "deploy")
-    fastapi = FastAPIApp(instance, provider, user=user, app_name=app_name)
-    fastapi.restart()
+    uv_inst = UVApp(instance, provider, user=user, app_name=app_name)
+    uv_inst.restart()
 
 
-@fastapi_app.command(name="status")
+@uv_app.command(name="status")
 def show_supervisor_status(target: str):
-    """Show supervisord status for FastAPI apps.
+    """Show supervisord status for uv apps.
 
     :param target: Instance name or IP address
     """
@@ -732,18 +759,18 @@ def show_supervisor_status(target: str):
     provider = instance.get("provider", "digitalocean")
 
     user = instance.get("user", "deploy")
-    fastapi = FastAPIApp(instance, provider, user=user)
-    print(fastapi.status())
+    uv_inst = UVApp(instance, provider, user=user)
+    print(uv_inst.status())
 
 
-@fastapi_app.command(name="logs")
+@uv_app.command(name="logs")
 def show_supervisor_logs(
     target: str,
     *,
     app_name: str | None = None,
     lines: int = 50,
 ):
-    """View supervisord logs for FastAPI apps.
+    """View supervisord logs for uv apps.
 
     :param target: Instance name or IP address
     :param app_name: App name (required if multiple apps exist on instance)
@@ -752,18 +779,18 @@ def show_supervisor_logs(
     instance = resolve_instance(target)
     provider = instance.get("provider", "digitalocean")
 
-    apps = [app for app in get_instance_apps(instance) if app["type"] == "fastapi"]
+    apps = [app for app in get_instance_apps(instance) if app["type"] == "uv"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "fastapi"
-    app_name = resolve_app_name(apps, "FastAPI", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "uv"
+    app_name = resolve_app_name(apps, "uv", app_name, fallback)
 
     user = instance.get("user", "deploy")
-    fastapi = FastAPIApp(instance, provider, user=user, app_name=app_name)
-    print(fastapi.logs(lines))
+    uv_inst = UVApp(instance, provider, user=user, app_name=app_name)
+    print(uv_inst.logs(lines))
 
 
-@fastapi_app.command(name="deploy")
-def deploy_fastapi(
+@uv_app.command(name="deploy")
+def deploy_uv(
     name: str,
     source: str,
     command: str,
@@ -773,7 +800,7 @@ def deploy_fastapi(
     user: str = "deploy",
     port: int = 8000,
     outgoing_port: int | None = None,
-    app_name: str = "fastapi",
+    app_name: str = "uv",
     static_subdir: str | None = None,
     provider: ProviderName | None = None,
     region: str | None = None,
@@ -783,7 +810,7 @@ def deploy_fastapi(
     no_ssl: bool = False,
     iam_role: str | None = None,
 ):
-    """Deploy FastAPI app with full infrastructure setup.
+    """Deploy uv app with full infrastructure setup.
 
     Creates a new cloud instance (if needed), sets up the server, deploys the app,
     and configures nginx with SSL. This is the complete deployment solution.
@@ -796,7 +823,7 @@ def deploy_fastapi(
     :param user: Remote user to run the app as (default: deploy)
     :param port: Port number for the app (default: 8000)
     :param outgoing_port: External port nginx listens on (default: 80 for --no-ssl, 443 for SSL)
-    :param app_name: Name of the app (default: fastapi)
+    :param app_name: Name of the app (default: uv)
     :param static_subdir: Subdirectory for static files to serve directly via nginx
     :param provider: Cloud provider (aws or digitalocean, default: digitalocean)
     :param region: Cloud provider region
@@ -810,6 +837,14 @@ def deploy_fastapi(
         error("--domain and --email are required unless --no-ssl is set")
 
     resolved_outgoing_port = outgoing_port if outgoing_port is not None else (80 if no_ssl else 443)
+
+    if port == resolved_outgoing_port:
+        error(
+            f"--port ({port}) and --outgoing-port ({resolved_outgoing_port}) must differ. "
+            "nginx binds to 0.0.0.0:outgoing-port and proxies to 127.0.0.1:port — "
+            "Linux does not allow both on the same port number. "
+            f"Use a different internal port, e.g. --port {port + 1000} --outgoing-port {resolved_outgoing_port}."
+        )
 
     instance_file = Path(f"{name}.instance.json")
 
@@ -837,7 +872,7 @@ def deploy_fastapi(
     if "user" not in data or data["user"] != user:
         data["user"] = user
 
-    add_app_to_instance(data, app_name, "fastapi", port,
+    add_app_to_instance(data, app_name, "uv", port,
         source=source, command=command, domain=domain, static_subdir=static_subdir,
         email=email, outgoing_port=resolved_outgoing_port)
     save_instance(name, data)
@@ -845,20 +880,22 @@ def deploy_fastapi(
     log(f"Deploying '{name}' to '{ip}'")
     print("=" * 50)
 
-    sync_fastapi(
+    sync_uv(
         name,
         source,
         command=command,
+        app_name=app_name,
     )
 
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=resolved_outgoing_port)
     aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
+    provider = get_provider(data["provider"], aws_profile=aws_profile)
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=resolved_outgoing_port, provider=provider)
     if not no_ssl:
         ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
     static_dir = f"/home/{user}/{app_name}/{static_subdir}" if static_subdir else None
     if no_ssl:
-        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=static_dir, ssh_user=ssh_user)
+        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=static_dir, ssh_user=ssh_user, provider=provider)
     else:
         setup_nginx_ssl(
             ip,
@@ -870,6 +907,7 @@ def deploy_fastapi(
             ssh_user=ssh_user,
             provider_name=data["provider"],
             aws_profile=aws_profile,
+            provider=provider,
         )
 
     log("Verifying deployment...")

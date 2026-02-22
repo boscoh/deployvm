@@ -1,7 +1,8 @@
-"""App deployment logic for Nuxt and FastAPI applications."""
+"""App deployment logic for Nuxt and uv Python applications."""
 
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 from textwrap import dedent
@@ -136,7 +137,7 @@ class BaseApp:
     def select_app(self, app_type: str, app_name: str | None = None) -> dict:
         """Select app from instance data.
 
-        :param app_type: App type (nuxt or fastapi)
+        :param app_type: App type (npm or uv)
         :param app_name: App name (if multiple apps exist)
         :return: App data dict
         """
@@ -161,8 +162,8 @@ class BaseApp:
         error(f"App '{app_name}' not found in instance")
 
 
-class NuxtApp(BaseApp):
-    """Nuxt app deployment."""
+class NpmApp(BaseApp):
+    """npm app deployment via PM2."""
 
     def __init__(
         self,
@@ -170,15 +171,21 @@ class NuxtApp(BaseApp):
         provider_name: str,
         *,
         user: str,
-        app_name: str = "nuxt",
+        app_name: str = "npm",
         port: int = 3000,
         node_version: int = 20,
+        start_script: str = ".output/server/index.mjs",
+        build_command: str = "npm run build",
+        dist_dir: str = ".output",
     ):
         super().__init__(instance_data, provider_name)
         self.user = user
         self.app_name = app_name
         self.port = port
         self.node_version = node_version
+        self.start_script = start_script
+        self.build_command = build_command
+        self.dist_dir = dist_dir
         self.app_dir = f"/home/{user}/{app_name}"
 
     def detect_node_version(self, source: str) -> int | None:
@@ -214,7 +221,26 @@ class NuxtApp(BaseApp):
         return None
 
     def generate_pm2_config(self) -> str:
-        """Generate PM2 ecosystem config."""
+        """Generate PM2 ecosystem config.
+
+        If start_script begins with 'npm ', it is treated as an npm command
+        (e.g. 'npm run serve') and PM2 is configured to run npm with the
+        remaining args. Otherwise start_script is used as a direct file path.
+        """
+        if self.start_script.startswith("npm "):
+            npm_args = self.start_script[len("npm "):]
+            script_line = f"script: 'npm',"
+            args_line = f"args: '{npm_args}',"
+            instances_line = "instances: 1,"
+            exec_mode_line = "exec_mode: 'fork',"
+        else:
+            script_line = f"script: './{self.start_script}',"
+            args_line = ""
+            instances_line = "instances: 'max',"
+            exec_mode_line = "exec_mode: 'cluster',"
+
+        args_block = f"\n                {args_line}" if args_line else ""
+
         return dedent(f"""
             const fs = require('fs');
             const path = require('path');
@@ -243,10 +269,10 @@ class NuxtApp(BaseApp):
             module.exports = {{
               apps: [{{
                 name: '{self.app_name}',
-                script: './.output/server/index.mjs',
+                {script_line}{args_block}
                 cwd: '{self.app_dir}',
-                instances: 'max',
-                exec_mode: 'cluster',
+                {instances_line}
+                {exec_mode_line}
                 env: {{
                   NODE_ENV: 'production',
                   PORT: {self.port},
@@ -256,6 +282,21 @@ class NuxtApp(BaseApp):
             }};
         """).strip()
 
+    def _fix_absolute_imports(self, source: str):
+        """Replace file:/// absolute path imports with null stubs in dist dir.
+
+        Nuxt devtools bakes absolute local machine paths into production builds
+        when devtools.enabled=true. These imports fail on the server.
+        """
+        dist_path = Path(source) / self.dist_dir
+        pattern = re.compile(r"import (\w+) from 'file:///[^']*';")
+        for mjs_file in dist_path.rglob("*.mjs"):
+            content = mjs_file.read_text()
+            new_content = pattern.sub(r"const \1 = null;", content)
+            if new_content != content:
+                log(f"Fixed absolute path import in {mjs_file.relative_to(source)}")
+                mjs_file.write_text(new_content)
+
     def sync(
         self,
         source: str,
@@ -263,7 +304,7 @@ class NuxtApp(BaseApp):
         local_build: bool = True,
         force: bool = False,
     ):
-        """Sync Nuxt app to server.
+        """Sync npm app to server.
 
         :param source: Local source directory
         :param local_build: Build locally instead of on server
@@ -311,16 +352,15 @@ class NuxtApp(BaseApp):
             user=self.ssh_user,
         )
 
-        nuxt_exclude = [
+        npm_exclude = [
             "node_modules",
             ".git",
-            ".output",
-            ".nuxt",
+            self.dist_dir,
             "public/projects",
             "data/scripts/models",
             "json/projects",
         ]
-        local_hash = self.compute_source_hash(source, nuxt_exclude)
+        local_hash = self.compute_source_hash(source, npm_exclude)
         try:
             remote_hash = ssh(
                 self.ip,
@@ -333,12 +373,10 @@ class NuxtApp(BaseApp):
         if not force and local_hash == remote_hash and remote_hash:
             log("Source unchanged, restarting app...")
             restart_script = dedent(f"""
-                if ! su - {self.user} -c "pm2 reload {self.app_name}" 2>/dev/null; then
-                    pkill -u {self.user} -f pm2 || true
-                    rm -rf /home/{self.user}/.pm2 || true
-                    rm -f /home/{self.user}/.pm2/*.sock /home/{self.user}/.pm2/pm2.pid 2>/dev/null || true
-                    sleep 1
-                    su - {self.user} -c "cd {self.app_dir} && pm2 start ecosystem.config.cjs && pm2 save"
+                if pm2 describe {self.app_name} > /dev/null 2>&1; then
+                    pm2 reload {self.app_name}
+                else
+                    cd {self.app_dir} && pm2 start ecosystem.config.cjs && pm2 save
                 fi
             """).strip()
             ssh_script(self.ip, restart_script, user=self.ssh_user)
@@ -348,15 +386,16 @@ class NuxtApp(BaseApp):
         if local_build:
             log("Building locally...")
             subprocess.run(["npm", "install"], cwd=source, check=True)
-            subprocess.run(["npm", "run", "build"], cwd=source, check=True)
+            subprocess.run(self.build_command.split(), cwd=source, check=True)
 
-            if not Path(source, ".output").exists():
-                error("Build failed - no .output directory")
+            if not Path(source, self.dist_dir).exists():
+                error(f"Build failed - no {self.dist_dir} directory")
+
+            self._fix_absolute_imports(source)
 
         log("Uploading...")
         exclude = [
             "/node_modules",
-            ".nuxt",
             ".git",
             "ecosystem.config.cjs",
             ".source_hash",
@@ -365,7 +404,7 @@ class NuxtApp(BaseApp):
             "json/projects",
         ]
         if not local_build:
-            exclude.append(".output")
+            exclude.append(self.dist_dir)
         rsync(source, self.ip, self.app_dir, exclude=exclude, user=self.ssh_user)
 
         if not local_build:
@@ -374,7 +413,7 @@ class NuxtApp(BaseApp):
                 set -e
                 cd {self.app_dir}
                 export NODE_OPTIONS="--max-old-space-size=1024"
-                su - {self.user} -c "cd {self.app_dir} && rm -rf package-lock.json .nuxt && npm install && npm run build"
+                su - {self.user} -c "cd {self.app_dir} && rm -rf package-lock.json && npm install && {self.build_command}"
             """).strip()
             ssh_script(self.ip, build_script, user=self.ssh_user, show_output=True)
 
@@ -382,41 +421,33 @@ class NuxtApp(BaseApp):
         start_script = dedent(f"""
             set -e
             echo "{local_hash}" > {self.app_dir}/.source_hash
-            # Legacy fallback: fix Nitro import.meta.url resolution for PM2
-            # (nginx now serves .output/public directly, so this is rarely needed)
-            sed -i 's/dirname(fileURLToPath(import.meta.url))/dirname(fileURLToPath(globalThis._importMeta_.url))/g' \
-                {self.app_dir}/.output/server/chunks/nitro/nitro.mjs 2>/dev/null || true
             sudo chown -R {self.user}:{self.user} {self.app_dir}
-            sudo pkill -u {self.user} -f pm2 || true
-            sudo pkill -u {self.user} -f "node.*index.mjs" || true
-            sudo rm -rf /home/{self.user}/.pm2 || true
-            sudo rm -f /home/{self.user}/.pm2/*.sock /home/{self.user}/.pm2/pm2.pid 2>/dev/null || true
-            sleep 1
-            su - {self.user} -c "cd {self.app_dir} && pm2 start ecosystem.config.cjs && pm2 save"
+            if pm2 describe {self.app_name} > /dev/null 2>&1; then
+                pm2 reload {self.app_name}
+            else
+                cd {self.app_dir} && pm2 start ecosystem.config.cjs && pm2 save
+            fi
             sudo pm2 startup systemd -u {self.user} --hp /home/{self.user} 2>/dev/null || true
         """).strip()
         ssh_script(self.ip, start_script, user=self.ssh_user)
-        log("App deployed!")
+        log("npm app deployed!")
 
     def restart(self):
         """Restart PM2 app."""
         log(f"Restarting {self.app_name}...")
-        ssh_as_user(
-            self.ip, self.user, f"pm2 reload {self.app_name}", ssh_user=self.ssh_user
-        )
+        ssh(self.ip, f"pm2 reload {self.app_name}", user=self.ssh_user)
         log("App restarted")
 
     def status(self):
         """Show PM2 status."""
-        return ssh_as_user(self.ip, self.user, "pm2 list", ssh_user=self.ssh_user)
+        return ssh(self.ip, "pm2 list", user=self.ssh_user)
 
     def logs(self, lines: int = 50):
         """Show PM2 logs."""
-        return ssh_as_user(
+        return ssh(
             self.ip,
-            self.user,
             f"pm2 logs {self.app_name} --lines {lines} --nostream",
-            ssh_user=self.ssh_user,
+            user=self.ssh_user,
         )
 
 
@@ -456,8 +487,8 @@ def validate_uv_lockfile(source: str):
     log("✓ uv.lock is in sync")
 
 
-class FastAPIApp(BaseApp):
-    """FastAPI app deployment."""
+class UVApp(BaseApp):
+    """uv Python app deployment."""
 
     def __init__(
         self,
@@ -465,7 +496,7 @@ class FastAPIApp(BaseApp):
         provider_name: str,
         *,
         user: str,
-        app_name: str = "fastapi",
+        app_name: str = "uv",
         port: int = 8000,
         command: str | None = None,
     ):
@@ -477,7 +508,7 @@ class FastAPIApp(BaseApp):
         self.app_dir = f"/home/{user}/{app_name}"
 
     def sync(self, source: str, *, force: bool = False) -> bool:
-        """Sync FastAPI app to server using supervisord.
+        """Sync uv Python app to server using supervisord.
 
         :param source: Local source directory
         :param force: Force rebuild even if source unchanged
@@ -496,7 +527,7 @@ class FastAPIApp(BaseApp):
 
         validate_uv_lockfile(source)
 
-        log(f"Deploying FastAPI to {self.ip}...")
+        log(f"Deploying uv app to {self.ip}...")
 
         log("Installing uv and supervisor...")
         setup_script = dedent(f"""
@@ -605,7 +636,7 @@ class FastAPIApp(BaseApp):
             f"sudo supervisorctl reread && sudo supervisorctl update && sudo supervisorctl restart {self.app_name}",
             user=self.ssh_user,
         )
-        log("FastAPI app deployed!")
+        log("uv app deployed!")
         return True
 
     def restart(self):

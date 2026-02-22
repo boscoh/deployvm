@@ -48,6 +48,8 @@ arx/
 
 # Deployment scripts
 tspot*
+chatboti*
+modeldrop*
 
 # UV lock file (except test fixtures)
 uv.lock
