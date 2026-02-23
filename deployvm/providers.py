@@ -56,9 +56,13 @@ class Provider(Protocol):
 
     def list_instances(self) -> list[dict]: ...
 
+    def get_nameservers(self, domain: str) -> list[str]: ...
+
     def setup_dns(self, domain: str, ip: str) -> None: ...
 
     def cleanup_resources(self, *, dry_run: bool = True) -> None: ...
+
+    def open_firewall_port(self, port: int) -> None: ...
 
 
 def _get_my_ip() -> str | None:
@@ -315,8 +319,14 @@ class DigitalOceanProvider:
                     ip,
                 )
 
+    def get_nameservers(self, domain: str) -> list[str]:
+        return ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"]
+
     def cleanup_resources(self, *, dry_run: bool = True) -> None:
         log("No cleanup operations available for DigitalOcean provider")
+
+    def open_firewall_port(self, port: int) -> None:
+        pass  # DigitalOcean uses UFW only, no cloud-level firewall
 
 
 class AWSProvider:
@@ -994,6 +1004,35 @@ class AWSProvider:
 
         return instances
 
+    def get_nameservers(self, domain: str) -> list[str]:
+        """Get Route53 nameservers for domain, creating hosted zone if needed.
+
+        :param domain: Domain name
+        :return: List of nameserver hostnames
+        """
+        import time
+
+        self.validate_auth()
+        route53 = self._get_route53_client()
+
+        response = route53.list_hosted_zones()
+        zone_id = None
+        for zone in response["HostedZones"]:
+            if zone["Name"] in (f"{domain}.", domain):
+                zone_id = zone["Id"]
+                break
+
+        if not zone_id:
+            log(f"Creating Route53 hosted zone for '{domain}'...")
+            create_response = route53.create_hosted_zone(
+                Name=domain,
+                CallerReference=str(int(time.time() * 1000)),
+            )
+            zone_id = create_response["HostedZone"]["Id"]
+
+        zone_response = route53.get_hosted_zone(Id=zone_id)
+        return zone_response["DelegationSet"]["NameServers"]
+
     def setup_dns(self, domain: str, ip: str) -> None:
         self.validate_auth()
         route53 = self._get_route53_client()
@@ -1001,12 +1040,18 @@ class AWSProvider:
         response = route53.list_hosted_zones()
         zone_id = None
         for zone in response["HostedZones"]:
-            if zone["Name"] == f"{domain}." or zone["Name"] == domain:
+            if zone["Name"] in (f"{domain}.", domain):
                 zone_id = zone["Id"]
                 break
 
         if not zone_id:
-            error(f"No Route53 hosted zone found for domain: '{domain}'")
+            import time
+            log(f"Creating Route53 hosted zone for '{domain}'...")
+            create_response = route53.create_hosted_zone(
+                Name=domain,
+                CallerReference=str(int(time.time() * 1000)),
+            )
+            zone_id = create_response["HostedZone"]["Id"]
 
         profile = self.aws_config.get("profile_name", "default")
         log(f"Updating Route53 DNS records for '{domain}' (profile: {profile})...")
@@ -1094,6 +1139,37 @@ class AWSProvider:
         if dry_run:
             log("\nRun with --no-dry-run to actually delete resources")
 
+    def open_firewall_port(self, port: int) -> None:
+        """Open a TCP port in the AWS deploy-vm-web security group.
+
+        :param port: TCP port number to open to 0.0.0.0/0
+        """
+        ec2 = self._get_ec2_client()
+        response = ec2.describe_security_groups(
+            Filters=[{"Name": "group-name", "Values": ["deploy-vm-web"]}]
+        )
+        if not response["SecurityGroups"]:
+            return
+        sg_id = response["SecurityGroups"][0]["GroupId"]
+        sg = ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]
+        for rule in sg["IpPermissions"]:
+            if (
+                rule.get("IpProtocol") == "tcp"
+                and rule.get("FromPort") == port
+                and rule.get("ToPort") == port
+            ):
+                return  # already open
+        ec2.authorize_security_group_ingress(
+            GroupId=sg_id,
+            IpPermissions=[{
+                "IpProtocol": "tcp",
+                "FromPort": port,
+                "ToPort": port,
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+            }],
+        )
+        log(f"Opened port {port} in AWS security group")
+
 
 class VultrProvider:
     """Cloud provider implementation for Vultr VPS."""
@@ -1150,10 +1226,13 @@ class VultrProvider:
         :raises SystemExit: If authentication validation fails
         """
         result = subprocess.run(
-            ["vultr-cli", "version"], capture_output=True, text=True
+            ["vultr-cli", "account", "info"], capture_output=True, text=True
         )
         if result.returncode != 0:
-            error("vultr-cli not authenticated or not installed. Check your API key.")
+            if "Unauthorized" in result.stderr or "401" in result.stderr:
+                error(f"vultr-cli authentication failed. Check your VULTR_API_KEY.\n  {result.stderr.strip()}")
+            else:
+                error(f"vultr-cli not working. Is it installed and configured?\n  {result.stderr.strip()}")
 
     def instance_exists(self, name: str) -> bool:
         """Check if an instance with the given label exists.
@@ -1371,10 +1450,15 @@ class VultrProvider:
         """Delete a Vultr instance by ID.
 
         :param instance_id: The instance ID to delete
-        :raises SystemExit: If deletion fails
+        :raises SystemExit: If deletion fails (404 treated as already deleted)
         """
         self.validate_auth()
-        run_cmd("vultr-cli", "instance", "delete", str(instance_id))
+        result = subprocess.run(
+            ["vultr-cli", "instance", "delete", str(instance_id)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0 and "404" not in result.stderr:
+            error(f"Command failed: {result.stderr}")
 
     def list_instances(self) -> list[dict]:
         """List all Vultr instances in the account.
@@ -1395,16 +1479,41 @@ class VultrProvider:
             for i in instances
         ]
 
+    def get_nameservers(self, domain: str) -> list[str]:
+        return ["ns1.vultr.com", "ns2.vultr.com"]
+
     def setup_dns(self, domain: str, ip: str) -> None:
-        """Stub: Vultr DNS management not implemented.
+        """Create Vultr DNS zone and upsert A records for root and www.
 
         :param domain: Domain to configure
         :param ip: IP address to point domain to
         """
-        warn(
-            f"Vultr DNS management not implemented. "
-            f"Configure DNS manually to point '{domain}' to '{ip}'."
-        )
+        result = run_cmd_json("vultr-cli", "dns", "domain", "list")
+        domains = result.get("domains") or []
+        domain_exists = any(d.get("domain") == domain for d in domains)
+
+        if not domain_exists:
+            log(f"Creating DNS zone for '{domain}'...")
+            run_cmd("vultr-cli", "dns", "domain", "create", "--domain", domain, "--ip", ip)
+        else:
+            log(f"DNS zone '{domain}' exists, updating records...")
+
+        records_result = run_cmd_json("vultr-cli", "dns", "record", "list", domain)
+        records = records_result.get("records") or []
+
+        for name in ["", "www"]:
+            existing = [r for r in records if r.get("type") == "A" and r.get("name") == name]
+            if existing:
+                record_id = str(existing[0]["id"])
+                run_cmd(
+                    "vultr-cli", "dns", "record", "update", domain, record_id,
+                    "--data", ip,
+                )
+            else:
+                run_cmd(
+                    "vultr-cli", "dns", "record", "create", domain,
+                    "--type", "A", "--name", name, "--data", ip, "--ttl", "300",
+                )
 
     def cleanup_resources(self, *, dry_run: bool = True) -> None:
         """Cleanup orphaned firewall groups not attached to any instance.
@@ -1443,6 +1552,31 @@ class VultrProvider:
 
         if dry_run:
             log("Run with --no-dry-run to actually delete resources")
+
+    def open_firewall_port(self, port: int) -> None:
+        """Open a TCP port in the Vultr deploy-vm-web firewall group.
+
+        :param port: TCP port number to open to 0.0.0.0/0
+        """
+        result = run_cmd_json("vultr-cli", "firewall", "group", "list")
+        groups = result.get("firewall_groups") or []
+        group = next((g for g in groups if g.get("description") == "deploy-vm-web"), None)
+        if not group:
+            return
+        group_id = group["id"]
+        rules_result = run_cmd_json("vultr-cli", "firewall", "rule", "list", group_id)
+        rules = rules_result.get("firewall_rules") or []
+        if any(str(r.get("port")) == str(port) for r in rules):
+            return  # already open
+        run_cmd(
+            "vultr-cli", "firewall", "rule", "create", group_id,
+            "--ip-type", "v4",
+            "--protocol", "tcp",
+            "--port", str(port),
+            "--subnet", "0.0.0.0",
+            "--size", "0",
+        )
+        log(f"Opened port {port} in Vultr firewall group")
 
 
 def check_aws_auth(profile: str | None = None) -> None:

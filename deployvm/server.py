@@ -16,12 +16,12 @@ import dns.resolver
 from fabric import Connection
 from rich import print
 
-from .providers import check_aws_auth
+from .providers import check_aws_auth, get_provider
 from .utils import error, log, warn
 
 ProviderName = Literal["digitalocean", "aws", "vultr"]
 
-SSH_TIMEOUT = 300
+SSH_TIMEOUT = 600
 HTTP_VERIFY_RETRIES = 6
 HTTP_VERIFY_DELAY = 5
 DNS_VERIFY_RETRIES = 30
@@ -33,8 +33,10 @@ def check_instance_auth(instance: dict) -> None:
 
     :param instance: Instance data dictionary (must have 'provider' key)
     """
-    if instance.get("provider") == "aws":
-        check_aws_auth(instance.get("aws_profile"))
+    provider = instance.get("provider")
+    aws_profile = instance.get("aws_profile")
+    p = get_provider(provider, aws_profile=aws_profile)
+    p.validate_auth()
 
 
 def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 10) -> bool:
@@ -49,27 +51,45 @@ def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 1
         with Connection(
             ip, user=ssh_user, connect_kwargs={"look_for_keys": True, "timeout": timeout}
         ) as c:
-            c.run("echo ping", hide=True)
+            c.run("echo ping", hide=True, in_stream=False)
         return True
     except Exception:
         return False
 
 
-def ssh(ip: str, cmd: str, user: str = "deploy", show_output: bool = False) -> str:
+def _run_ssh(ip: str, cmd: str, user: str, show_output: bool) -> str:
+    """Single SSH attempt - open connection, run cmd, return stdout."""
     with Connection(ip, user=user, connect_kwargs={"look_for_keys": True}) as c:
-        result = c.run(cmd, hide=not show_output, warn=True)
+        result = c.run(cmd, hide=not show_output, warn=True, in_stream=False)
         if result.failed:
-            error(f"SSH command failed: {result.stderr}")
+            raise RuntimeError(result.stderr)
         return result.stdout
+
+
+def _retry_ssh(ip: str, cmd: str, user: str, show_output: bool, fail_msg: str) -> str:
+    """Run SSH command with up to 3 retries on transient connection resets."""
+    from paramiko.ssh_exception import SSHException as ParamikoSSH
+
+    for attempt in range(3):
+        try:
+            return _run_ssh(ip, cmd, user, show_output)
+        except RuntimeError as e:
+            error(fail_msg + str(e))
+        except ParamikoSSH as e:
+            if "Error reading SSH protocol banner" in str(e) and attempt < 2:
+                time.sleep(5)
+                continue
+            error(f"SSH connection failed: {e}")
+    error(f"SSH connection failed after retries")  # unreachable but satisfies type checker
+
+
+def ssh(ip: str, cmd: str, user: str = "deploy", show_output: bool = False) -> str:
+    return _retry_ssh(ip, cmd, user, show_output, "SSH command failed: ")
 
 
 def ssh_script(ip: str, script: str, user: str = "deploy", show_output: bool = False) -> str:
-    with Connection(ip, user=user, connect_kwargs={"look_for_keys": True}) as c:
-        escaped = script.replace("'", "'\\''")
-        result = c.run(f"bash -c '{escaped}'", hide=not show_output, warn=True)
-        if result.failed:
-            error(f"SSH script failed: {result.stderr}")
-        return result.stdout
+    escaped = script.replace("'", "'\\''")
+    return _retry_ssh(ip, f"bash -c '{escaped}'", user, show_output, "SSH script failed: ")
 
 
 def ssh_as_user(ip: str, app_user: str, cmd: str, ssh_user: str = "deploy") -> str:
@@ -395,17 +415,51 @@ def compute_hash(source: str, exclude: list[str] | None = None) -> str:
 def wait_for_ssh(ip: str, user: str = "deploy", timeout: int = SSH_TIMEOUT):
     log(f"Waiting for SSH on '{ip}'...")
     start = time.time()
+    ever_connected = False  # True once we see TCP response (not pure timeout)
+    thread_exc_start = None  # When we first saw ThreadException(OSError)
     while time.time() - start < timeout:
         try:
             with Connection(
                 ip, user=user, connect_kwargs={"look_for_keys": True, "timeout": 5}
             ) as c:
-                c.run("echo ok", hide=True)
+                c.run("echo ok", hide=True, in_stream=False)
                 log("SSH ready")
                 return
-        except Exception:
+        except Exception as e:
             elapsed = int(time.time() - start)
-            log(f"SSH not ready yet ({elapsed}s elapsed), retrying...")
+            exc_name = type(e).__name__
+            # NoValidConnectionsError = connection refused (port reachable, SSH not up)
+            # AuthenticationException = SSH up but key rejected
+            # TimeoutError / socket.timeout = no route or firewall block
+            # ThreadException(OSError) = TCP connects but SSH banner fails (broken sshd)
+            if exc_name not in ("TimeoutError", "socket.timeout"):
+                ever_connected = True
+            # After 60s if still only seeing timeouts, the IP is likely unreachable
+            if elapsed > 60 and not ever_connected:
+                error(
+                    f"IP '{ip}' appears unreachable after {elapsed}s "
+                    "(only connection timeouts, no TCP response). "
+                    "Check firewall rules or try recreating the instance."
+                )
+            if exc_name == "ThreadException":
+                inner_types = [x.type.__name__ for x in e.exceptions]
+                inner_vals = [str(x.value)[:60] for x in e.exceptions]
+                detail = f"inner: {', '.join(f'{t}: {v}' for t, v in zip(inner_types, inner_vals))}"
+                # Track when we first started seeing ThreadException(OSError)
+                if any(t == "OSError" for t in inner_types):
+                    if thread_exc_start is None:
+                        thread_exc_start = time.time()
+                    elif time.time() - thread_exc_start > 120:
+                        error(
+                            f"SSH on '{ip}' appears broken after {elapsed}s "
+                            "(TCP connects but SSH banner fails with OSError for >120s). "
+                            "Try recreating the instance."
+                        )
+            else:
+                detail = ""
+                thread_exc_start = None  # Reset if we see a different error
+            suffix = f" ({detail})" if detail else ""
+            log(f"SSH not ready yet ({elapsed}s, {exc_name}){suffix}, retrying...")
         time.sleep(5)
     error(f"SSH timeout after '{timeout}s'")
 
@@ -699,6 +753,7 @@ def setup_nginx_ssl(
     outgoing_port: int = 443,
     static_dir: str | None = None,
     skip_dns: bool = False,
+    staging: bool = False,
     ssh_user: str = "deploy",
     provider_name: ProviderName = "digitalocean",
     aws_profile: str | None = None,
@@ -756,17 +811,18 @@ def setup_nginx_ssl(
     verify_http(ip, domain=domain)
 
     log("Obtaining SSL certificate...")
+    staging_flag = "--staging " if staging else ""
     ssl_script = dedent(f"""
         set -e
         sudo apt-get install -y certbot python3-certbot-nginx
         if [ -d "/etc/letsencrypt/live/{domain}" ]; then
             echo "Certificate exists, renewing if needed..."
-            sudo certbot --nginx -d {domain} -d www.{domain} \\
+            sudo certbot --nginx {staging_flag}-d {domain} -d www.{domain} \\
                 --non-interactive --agree-tos --email {email} \\
                 --redirect --keep-until-expiring
         else
             echo "Issuing new certificate..."
-            sudo certbot --nginx -d {domain} -d www.{domain} \\
+            sudo certbot --nginx {staging_flag}-d {domain} -d www.{domain} \\
                 --non-interactive --agree-tos --email {email} --redirect
         fi
         sudo systemctl enable --now certbot.timer
@@ -786,8 +842,26 @@ def setup_nginx_ssl(
         """).strip()
         ssh_script(ip, add_listen_script, user=ssh_user)
 
+    # Ensure direct IP access still works alongside the domain SSL config.
+    # Certbot's HTTP block only matches the domain, so IP requests need a catch-all.
+    # Remove any prior catch-all configs first to avoid duplicate server_name _ conflicts.
+    ssh_script(
+        ip,
+        "for f in $(grep -rl 'server_name _' /etc/nginx/sites-enabled/ 2>/dev/null);"
+        " do sudo rm -f \"$f\"; done",
+        user=ssh_user,
+    )
+    ip_block = generate_nginx_server_block("_", port, static_dir, listen="80")
+    ssh_write_file(ip, "/etc/nginx/sites-available/ip-access", ip_block, user=ssh_user)
+    ssh_script(
+        ip,
+        "sudo ln -sf /etc/nginx/sites-available/ip-access /etc/nginx/sites-enabled/ip-access"
+        " && sudo nginx -t && sudo systemctl reload nginx",
+        user=ssh_user,
+    )
+
     port_suffix = f":{outgoing_port}" if outgoing_port != 443 else ""
-    log(f"SSL configured! 'https://{domain}{port_suffix}'")
+    log(f"SSL configured! http://{ip} and https://{domain}{port_suffix}")
 
 
 def verify_instance(

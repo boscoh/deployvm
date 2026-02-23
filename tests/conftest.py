@@ -8,6 +8,8 @@ from deployvm.providers import get_provider
 from deployvm.server import load_instance, save_instance, setup_server, wait_for_ssh
 from deployvm.utils import get_ssh_user
 
+MAX_INSTANCE_RETRIES = 5
+
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -24,29 +26,51 @@ def provider_name(request):
 
 @pytest.fixture(scope="session")
 def live_instance(provider_name):
-    """Create a real cloud instance, set it up, yield its name, delete on teardown."""
-    name = f"test-deployvm-{uuid4().hex[:8]}"
+    """Create a real cloud instance, set it up, yield its name, delete on teardown.
+
+    Retries up to MAX_INSTANCE_RETRIES times if SSH setup fails (e.g. bad IP).
+    """
     user = "deploy"
-
-    p = get_provider(provider_name)
-    p.validate_auth()
-
-    result = p.create_instance(name, p.region, p.vm_size)
     ssh_user = get_ssh_user(provider_name)
 
-    instance_data = {
-        "id": result["id"],
-        "ip": result["ip"],
-        "provider": provider_name,
-        "region": p.region,
-        "vm_size": p.vm_size,
-        "user": user,
-        "apps": [],
-    }
-    save_instance(name, instance_data)
+    name = None
+    instance_id = None
 
-    wait_for_ssh(result["ip"], user=ssh_user)
-    setup_server(result["ip"], user=user, ssh_user=ssh_user)
+    for attempt in range(1, MAX_INSTANCE_RETRIES + 1):
+        name = f"test-deployvm-{uuid4().hex[:8]}"
+        p = get_provider(provider_name)
+        p.validate_auth()
+
+        print(f"\n[INFO] Creating instance (attempt {attempt}/{MAX_INSTANCE_RETRIES})...")
+        result = p.create_instance(name, p.region, p.vm_size)
+        instance_id = result["id"]
+
+        instance_data = {
+            "id": instance_id,
+            "ip": result["ip"],
+            "provider": provider_name,
+            "region": p.region,
+            "vm_size": p.vm_size,
+            "user": user,
+            "apps": [],
+        }
+        save_instance(name, instance_data)
+
+        try:
+            wait_for_ssh(result["ip"], user=ssh_user)
+            setup_server(result["ip"], user=user, ssh_user=ssh_user)
+            break  # success
+        except SystemExit:
+            print(f"[WARN] Instance {name} ({result['ip']}) failed SSH setup, deleting...")
+            try:
+                p2 = get_provider(provider_name)
+                p2.delete_instance(instance_id)
+            except (Exception, SystemExit):
+                pass
+            Path(f"{name}.instance.json").unlink(missing_ok=True)
+            name = None
+            if attempt == MAX_INSTANCE_RETRIES:
+                pytest.fail(f"Failed to get a working instance after {MAX_INSTANCE_RETRIES} attempts")
 
     try:
         yield name

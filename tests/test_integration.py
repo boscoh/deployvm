@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from deployvm.apps import FastAPIApp
+from deployvm.apps import UVApp as FastAPIApp
 from deployvm.providers import get_provider
 from deployvm.server import (
     check_instance_reachable,
@@ -93,7 +93,7 @@ def test_04_resync_changed(live_instance, tmp_path_factory):
     """Code change triggers full re-sync and new version is visible."""
     tmpdir = tmp_path_factory.mktemp("testapp_v2")
     app_dir = tmpdir / "testapp"
-    shutil.copytree(TESTAPP_DIR, app_dir)
+    shutil.copytree(TESTAPP_DIR, app_dir, ignore=shutil.ignore_patterns(".venv", "__pycache__", "*.pyc"))
 
     app_py = app_dir / "app.py"
     app_py.write_text(app_py.read_text().replace('"version": 1', '"version": 2'))
@@ -129,12 +129,13 @@ def test_05_nginx_ip(live_instance):
 
 @pytest.mark.integration
 def test_06_nginx_ip_idempotent(live_instance):
-    """Re-running nginx ip setup leaves port 80 working."""
+    """Re-running nginx ip setup is idempotent: port 80 still works."""
     instance = load_instance(live_instance)
     setup_nginx_ip(instance["ip"], port=APP_PORT, ssh_user="deploy")
 
     response = httpx.get(f"http://{instance['ip']}/", timeout=30)
     assert response.status_code == 200
+
 
 
 @pytest.mark.integration
