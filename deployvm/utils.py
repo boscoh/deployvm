@@ -1,25 +1,63 @@
 """Shared utility functions."""
 
 import json
+import logging
 import subprocess
 import sys
 
-from rich import print
+from rich.console import Console
+from rich.logging import RichHandler
+
+logger = logging.getLogger("deployvm")
 
 
-def log(msg: str):
-    """Log info message in green."""
-    print(f"[green][INFO][/green] {msg}")
+def setup_logging(level: int | str = logging.INFO) -> None:
+    """Set up logging with Rich handler to stderr."""
+    if isinstance(level, str):
+        level = getattr(logging, level.upper())
+    rich_handler = RichHandler(
+        console=Console(stderr=True),
+        log_time_format="[%X]",
+        show_path=False,
+        markup=True,
+    )
+    rich_handler.setLevel(level)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    for handler in root_logger.handlers[:]:
+        handler.close()
+        root_logger.removeHandler(handler)
+    root_logger.addHandler(rich_handler)
+
+    for name, lvl, propagate in [
+        ("boto3", logging.INFO, True),
+        ("botocore", logging.WARNING, True),
+        ("urllib3", logging.WARNING, True),
+        ("httpx", logging.WARNING, True),
+        ("paramiko", logging.WARNING, True),
+        ("fabric", logging.WARNING, True),
+    ]:
+        lg = logging.getLogger(name)
+        for h in lg.handlers[:]:
+            lg.removeHandler(h)
+        lg.setLevel(lvl)
+        lg.propagate = propagate
 
 
-def warn(msg: str):
-    """Log warning message in yellow."""
-    print(f"[yellow][WARN][/yellow] {msg}")
+def log(msg: str) -> None:
+    """Log info message."""
+    logger.info(msg)
 
 
-def error(msg: str):
-    """Log error message in red and exit."""
-    print(f"[red][ERROR][/red] {msg}")
+def warn(msg: str) -> None:
+    """Log warning message."""
+    logger.warning(msg)
+
+
+def error(msg: str) -> None:
+    """Log error message and exit."""
+    logger.error(msg)
     sys.exit(1)
 
 

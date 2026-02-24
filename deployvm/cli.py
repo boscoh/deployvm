@@ -17,6 +17,10 @@ from pathlib import Path
 import cyclopts
 from rich import print
 
+from .utils import setup_logging
+
+setup_logging()
+
 from .apps import UVApp, NpmApp
 from .providers import ProviderName, get_provider
 from .server import (
@@ -916,13 +920,11 @@ def get_nameservers(
     :param domain: Domain name (e.g., example.com)
     :param provider: Cloud provider (aws, digitalocean, or vultr)
     """
+    import json
+
     p = get_provider(provider)
     nameservers = p.get_nameservers(domain)
-
-    print(f"Nameservers for {domain} ({p.provider_name}):")
-    for ns in nameservers:
-        print(f"  {ns}")
-    print(f"\nSet these at your domain registrar under DNS/Nameserver settings for '{domain}'.")
+    print(json.dumps(nameservers))
 
 
 
