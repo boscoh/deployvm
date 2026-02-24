@@ -17,7 +17,7 @@ from pathlib import Path
 import cyclopts
 from rich import print
 
-from .utils import setup_logging
+from .utils import UVICORN_LOG_CONFIG, setup_logging
 
 setup_logging()
 
@@ -904,6 +904,26 @@ def deploy_uv(
         log(f"Done! http://{ip}{port_suffix}")
     else:
         log(f"Done! https://{domain}{port_suffix}")
+
+
+@app.command(name="serve", sort_key=4)
+def serve(
+    app_path: str,
+    *,
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    reload: bool = False,
+):
+    """Start a local uvicorn server with logs routed through RichHandler.
+
+    :param app_path: App module path (e.g., 'myapp:app')
+    :param host: Host to bind to
+    :param port: Port to listen on
+    :param reload: Enable auto-reload on file changes
+    """
+    import uvicorn
+
+    uvicorn.run(app_path, host=host, port=port, reload=reload, log_config=UVICORN_LOG_CONFIG)
 
 
 @app.command(name="nameservers", sort_key=5)
