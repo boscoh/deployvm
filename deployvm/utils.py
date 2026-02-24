@@ -10,6 +10,43 @@ from rich.logging import RichHandler
 
 logger = logging.getLogger("deployvm")
 
+# Pass to uvicorn.run(log_config=UVICORN_LOG_CONFIG) to prevent uvicorn from
+# installing its own StreamHandler, so all logs flow through our RichHandler.
+UVICORN_LOG_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {},
+    "handlers": {},
+    "loggers": {
+        "uvicorn": {"propagate": True, "level": "INFO"},
+        "uvicorn.access": {"propagate": False, "level": "WARNING"},
+        "uvicorn.error": {"propagate": True, "level": "INFO"},
+    },
+}
+
+
+class LogStream:
+    """File-like stream that routes output through the logger line by line.
+
+    Use as out_stream/err_stream in fabric c.run() calls so remote SSH output
+    goes through the logging system instead of directly to the terminal.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def write(self, text: str) -> None:
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                logger.info(line)
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            logger.info(self._buf)
+            self._buf = ""
+
 
 def setup_logging(level: int | str = logging.INFO) -> None:
     """Set up logging with Rich handler to stderr."""
@@ -37,6 +74,9 @@ def setup_logging(level: int | str = logging.INFO) -> None:
         ("httpx", logging.WARNING, True),
         ("paramiko", logging.WARNING, True),
         ("fabric", logging.WARNING, True),
+        ("uvicorn", logging.INFO, True),
+        ("uvicorn.access", logging.WARNING, True),
+        ("uvicorn.error", logging.INFO, True),
     ]:
         lg = logging.getLogger(name)
         for h in lg.handlers[:]:

@@ -17,7 +17,7 @@ from fabric import Connection
 from rich import print
 
 from .providers import check_aws_auth, get_provider
-from .utils import error, log, warn
+from .utils import LogStream, error, log, warn
 
 ProviderName = Literal["digitalocean", "aws", "vultr"]
 
@@ -60,7 +60,13 @@ def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 1
 def _run_ssh(ip: str, cmd: str, user: str, show_output: bool) -> str:
     """Single SSH attempt - open connection, run cmd, return stdout."""
     with Connection(ip, user=user, connect_kwargs={"look_for_keys": True}) as c:
-        result = c.run(cmd, hide=not show_output, warn=True, in_stream=False)
+        if show_output:
+            stream = LogStream()
+            result = c.run(cmd, hide=True, warn=True, in_stream=False,
+                           out_stream=stream, err_stream=stream)
+            stream.flush()
+        else:
+            result = c.run(cmd, hide=True, warn=True, in_stream=False)
         if result.failed:
             raise RuntimeError(result.stderr)
         return result.stdout
