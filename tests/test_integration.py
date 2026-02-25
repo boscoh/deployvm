@@ -24,14 +24,14 @@ from deployvm.server import (
 )
 from deployvm.utils import get_ssh_user
 
-TESTAPP_DIR = Path(__file__).parent / "fixtures" / "testapp"
+FASTAPIAPP_DIR = Path(__file__).parent / "fixtures" / "fastapiapp"
 FASTAPI_COMMAND = "uv run uvicorn app:app --host 0.0.0.0 --port 8000"
-APP_NAME = "testapp"
+APP_NAME = "fastapiapp"
 APP_PORT = 8000
 
-TESTAPP2_DIR = Path(__file__).parent / "fixtures" / "testapp2"
-FASTAPI_COMMAND2 = "uv run uvicorn app:app --host 0.0.0.0 --port 8001"
-APP2_NAME = "testapp2"
+FLASKAPP_DIR = Path(__file__).parent / "fixtures" / "flaskapp"
+FLASK_COMMAND = "uv run gunicorn -b 0.0.0.0:8001 app:app"
+APP2_NAME = "flaskapp"
 APP2_PORT = 8001
 
 
@@ -47,7 +47,7 @@ def _make_fastapi(live_instance: str) -> FastAPIApp:
     )
 
 
-def _make_fastapi2(live_instance: str) -> FastAPIApp:
+def _make_flask(live_instance: str) -> FastAPIApp:
     instance = load_instance(live_instance)
     return FastAPIApp(
         instance,
@@ -55,7 +55,7 @@ def _make_fastapi2(live_instance: str) -> FastAPIApp:
         user=instance.get("user", "deploy"),
         app_name=APP2_NAME,
         port=APP2_PORT,
-        command=FASTAPI_COMMAND2,
+        command=FLASK_COMMAND,
     )
 
 
@@ -75,7 +75,7 @@ def test_01_create(live_instance):
 def test_02_deploy(live_instance):
     """Initial FastAPI sync: supervisord RUNNING and app responds on localhost:8000."""
     fastapi = _make_fastapi(live_instance)
-    result = fastapi.sync(str(TESTAPP_DIR))
+    result = fastapi.sync(str(FASTAPIAPP_DIR))
     assert result is True, "Expected full sync on first deploy"
 
     instance = load_instance(live_instance)
@@ -91,33 +91,33 @@ def test_02_deploy(live_instance):
 
 
 @pytest.mark.integration
-def test_02b_deploy_second_app(live_instance):
-    """Second FastAPI app deploys on port 8001; both apps respond independently."""
-    fastapi2 = _make_fastapi2(live_instance)
-    result = fastapi2.sync(str(TESTAPP2_DIR))
-    assert result is True, "Expected full sync on first deploy of second app"
+def test_02b_deploy_flask(live_instance):
+    """Flask app deploys on port 8001; both apps respond independently."""
+    flask = _make_flask(live_instance)
+    result = flask.sync(str(FLASKAPP_DIR))
+    assert result is True, "Expected full sync on first deploy of Flask app"
 
     instance = load_instance(live_instance)
     status = ssh(instance["ip"], f"sudo supervisorctl status {APP2_NAME}", user="deploy")
-    assert "RUNNING" in status, f"Supervisord not RUNNING for second app: {status}"
+    assert "RUNNING" in status, f"Supervisord not RUNNING for Flask app: {status}"
 
     # First app still running
     response1 = ssh(instance["ip"], f"curl -sf http://localhost:{APP_PORT}/", user="deploy")
     data1 = json.loads(response1)
     assert data1["version"] == 1
 
-    # Second app running independently
+    # Flask app running independently
     response2 = ssh(instance["ip"], f"curl -sf http://localhost:{APP2_PORT}/", user="deploy")
     data2 = json.loads(response2)
     assert data2["version"] == 1
-    assert data2["app"] == "testapp2"
+    assert data2["app"] == "flaskapp"
 
 
 @pytest.mark.integration
 def test_03_resync_unchanged(live_instance):
     """Re-sync with no source change takes fast path (returns False)."""
     fastapi = _make_fastapi(live_instance)
-    result = fastapi.sync(str(TESTAPP_DIR))
+    result = fastapi.sync(str(FASTAPIAPP_DIR))
     assert result is False, "Expected fast path when source unchanged"
 
     instance = load_instance(live_instance)
@@ -131,9 +131,9 @@ def test_03_resync_unchanged(live_instance):
 @pytest.mark.integration
 def test_04_resync_changed(live_instance, tmp_path_factory):
     """Code change triggers full re-sync and new version is visible."""
-    tmpdir = tmp_path_factory.mktemp("testapp_v2")
-    app_dir = tmpdir / "testapp"
-    shutil.copytree(TESTAPP_DIR, app_dir, ignore=shutil.ignore_patterns(".venv", "__pycache__", "*.pyc"))
+    tmpdir = tmp_path_factory.mktemp("fastapiapp_v2")
+    app_dir = tmpdir / "fastapiapp"
+    shutil.copytree(FASTAPIAPP_DIR, app_dir, ignore=shutil.ignore_patterns(".venv", "__pycache__", "*.pyc"))
 
     app_py = app_dir / "app.py"
     app_py.write_text(app_py.read_text().replace('"version": 1', '"version": 2'))
@@ -175,7 +175,6 @@ def test_06_nginx_ip_idempotent(live_instance):
 
     response = httpx.get(f"http://{instance['ip']}/", timeout=30)
     assert response.status_code == 200
-
 
 
 @pytest.mark.integration
