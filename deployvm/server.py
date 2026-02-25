@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 import time
@@ -151,32 +152,71 @@ def rsync(
         error(f"rsync failed: {result.stderr}")
 
 
+def _tar_should_exclude(arcpath: str, exclude: list[str]) -> bool:
+    """Mirror rsync exclude semantics for tar archive paths.
+
+    - Leading '/' in pattern: root-relative, only match at the top level.
+    - Pattern containing '/' (no leading): match at that exact relative path.
+    - Pattern with no '/': match any item with that basename at any depth.
+
+    :param arcpath: Relative path inside the archive (e.g. 'dir/file.txt')
+    :param exclude: List of rsync-style exclude patterns
+    :return: True if the path should be excluded
+    """
+    parts = arcpath.replace("\\", "/").split("/")
+    basename = parts[-1]
+    for ex in exclude or []:
+        if ex.startswith("/"):
+            root_name = ex.lstrip("/")
+            if len(parts) == 1 and parts[0] == root_name:
+                return True
+        elif "/" in ex:
+            if arcpath == ex or arcpath.startswith(ex + "/"):
+                return True
+        else:
+            if basename == ex:
+                return True
+    return False
+
+
 def _rsync_tar_fallback(
     local: str, ip: str, remote: str, exclude: list[str], user: str
 ):
+    import tarfile
     import tempfile
 
     log("Creating tar archive...")
-    exclude_args = []
-    for ex in exclude or []:
-        exclude_args.extend(["--exclude", ex.lstrip("/")])
-
     with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-        tar_cmd = (
-            [
-                "tar",
-                "-czf",
-                tmp.name,
-                "-C",
-                local,
-            ]
-            + exclude_args
-            + ["."]
-        )
-        result = subprocess.run(tar_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            error(f"tar creation failed: {result.stderr}")
         tar_path = tmp.name
+
+    try:
+        with tarfile.open(tar_path, "w:gz") as tar:
+            for dirpath, dirnames, filenames in os.walk(local):
+                reldir = os.path.relpath(dirpath, local)
+                reldir = "" if reldir == "." else reldir
+
+                # Prune excluded directories in-place so os.walk skips them
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not _tar_should_exclude(
+                        os.path.join(reldir, d).replace("\\", "/") if reldir else d,
+                        exclude,
+                    )
+                ]
+
+                for filename in filenames:
+                    arcpath = (
+                        os.path.join(reldir, filename).replace("\\", "/")
+                        if reldir
+                        else filename
+                    )
+                    if not _tar_should_exclude(arcpath, exclude):
+                        tar.add(os.path.join(dirpath, filename), arcname=arcpath)
+    except Exception as e:
+        Path(tar_path).unlink(missing_ok=True)
+        error(f"tar creation failed: {e}")
+
+    tar_path_obj = Path(tar_path)
 
     try:
         log("Uploading tar archive...")
@@ -209,7 +249,7 @@ def _rsync_tar_fallback(
         ssh_script(ip, extract_script, user=user)
         log("Transfer complete")
     finally:
-        Path(tar_path).unlink(missing_ok=True)
+        tar_path_obj.unlink(missing_ok=True)
 
 
 def load_instance(name: str) -> dict:

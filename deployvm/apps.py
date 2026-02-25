@@ -231,13 +231,11 @@ class NpmApp(BaseApp):
             npm_args = self.start_script[len("npm "):]
             script_line = f"script: 'npm',"
             args_line = f"args: '{npm_args}',"
-            instances_line = "instances: 1,"
-            exec_mode_line = "exec_mode: 'fork',"
         else:
             script_line = f"script: './{self.start_script}',"
             args_line = ""
-            instances_line = "instances: 'max',"
-            exec_mode_line = "exec_mode: 'cluster',"
+        instances_line = "instances: 1,"
+        exec_mode_line = "exec_mode: 'fork',"
 
         args_block = f"\n                {args_line}" if args_line else ""
 

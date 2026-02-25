@@ -1,0 +1,6 @@
+{
+  "name": "nextapp",
+  "private": true,
+  "scripts": { "build": "next build", "start": "node .next/standalone/server.js" },
+  "dependencies": { "next": "^15.0.0", "react": "^18.0.0", "react-dom": "^18.0.0" }
+}

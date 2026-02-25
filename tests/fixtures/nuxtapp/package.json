@@ -1,0 +1,6 @@
+{
+  "name": "nuxtapp",
+  "private": true,
+  "scripts": { "build": "nuxt build", "start": "node .output/server/index.mjs" },
+  "dependencies": { "nuxt": "^3.13.0" }
+}

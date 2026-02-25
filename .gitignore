@@ -55,6 +55,12 @@ modeldrop*
 uv.lock
 !tests/fixtures/**/uv.lock
 
+# Node.js fixture build artifacts
+tests/fixtures/**/node_modules/
+tests/fixtures/**/.next/
+tests/fixtures/**/.output/
+tests/fixtures/**/.nuxt/
+
 # OS
 .DS_Store
 Thumbs.db

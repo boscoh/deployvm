@@ -528,6 +528,110 @@ class AWSProvider:
 
         return True, None
 
+    def _repair_vpc(self, ec2, vpc_id: str) -> None:
+        """Auto-repair VPC by creating missing internet gateway and routes.
+
+        Handles:
+        - Missing internet gateway: creates one and attaches it
+        - Missing IGW route in main route table: adds 0.0.0.0/0 → IGW
+        - Subnets without public IP assignment: enables MapPublicIpOnLaunch
+
+        :param ec2: Boto3 EC2 client instance
+        :param vpc_id: VPC ID to repair
+        """
+        igws = ec2.describe_internet_gateways(
+            Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}]
+        )["InternetGateways"]
+
+        if not igws:
+            log(f"VPC {vpc_id} has no internet gateway — creating one...")
+            igw = ec2.create_internet_gateway(
+                TagSpecifications=[{
+                    "ResourceType": "internet-gateway",
+                    "Tags": [
+                        {"Key": "Name", "Value": "deploy-vm-igw"},
+                        {"Key": "ManagedBy", "Value": "deploy-vm"},
+                    ],
+                }]
+            )["InternetGateway"]
+            igw_id = igw["InternetGatewayId"]
+            ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+            log(f"Created and attached internet gateway: {igw_id}")
+        else:
+            igw_id = igws[0]["InternetGatewayId"]
+
+        main_rts = ec2.describe_route_tables(
+            Filters=[
+                {"Name": "vpc-id", "Values": [vpc_id]},
+                {"Name": "association.main", "Values": ["true"]},
+            ]
+        )["RouteTables"]
+
+        if not main_rts:
+            region = self.aws_config.get("region_name", "ap-southeast-2")
+            error(
+                f"VPC {vpc_id} has no main route table — cannot auto-repair.\n"
+                f"Fix manually:\n"
+                f"  aws ec2 create-default-vpc --region {region}"
+            )
+
+        main_rt = main_rts[0]
+        rt_id = main_rt["RouteTableId"]
+        has_igw_route = any(
+            r.get("GatewayId", "").startswith("igw-")
+            for r in main_rt.get("Routes", [])
+        )
+        if not has_igw_route:
+            log(f"Adding internet gateway route to route table {rt_id}...")
+            ec2.create_route(
+                RouteTableId=rt_id,
+                DestinationCidrBlock="0.0.0.0/0",
+                GatewayId=igw_id,
+            )
+            log("Added route: 0.0.0.0/0 → IGW")
+
+        subnets = ec2.describe_subnets(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+        )["Subnets"]
+        for subnet in subnets:
+            if not subnet.get("MapPublicIpOnLaunch"):
+                ec2.modify_subnet_attribute(
+                    SubnetId=subnet["SubnetId"],
+                    MapPublicIpOnLaunch={"Value": True},
+                )
+                log(f"Enabled public IP assignment on subnet {subnet['SubnetId']}")
+
+    def _get_public_subnet_for_sg(self, ec2, sg_id: str) -> str | None:
+        """Return a public subnet ID for the VPC containing the security group.
+
+        Returns None when the security group is in the default VPC (EC2 selects
+        the subnet automatically). For non-default VPCs, a subnet ID must be
+        supplied via NetworkInterfaces to avoid VPCIdNotSpecified errors.
+
+        :param ec2: Boto3 EC2 client instance
+        :param sg_id: Security group ID to look up
+        :return: Subnet ID, or None for the default VPC
+        """
+        sg = ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]
+        vpc_id = sg.get("VpcId")
+        if not vpc_id:
+            return None
+
+        vpcs = ec2.describe_vpcs(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["Vpcs"]
+        if vpcs and vpcs[0].get("IsDefault"):
+            return None
+
+        subnets = ec2.describe_subnets(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+        )["Subnets"]
+        if not subnets:
+            error(f"No subnets found in VPC {vpc_id}")
+
+        public = [s for s in subnets if s.get("MapPublicIpOnLaunch")]
+        chosen = public[0] if public else subnets[0]
+        log(f"Using subnet '{chosen['SubnetId']}' in VPC '{vpc_id}'")
+        return chosen["SubnetId"]
+
     def _get_my_ip(self) -> str | None:
         """Get the current public IP address for SSH restriction.
 
@@ -689,14 +793,19 @@ class AWSProvider:
 
                 is_valid, error_msg = self._validate_vpc(ec2, vpc_id)
                 if not is_valid:
-                    error(
-                        f"VPC {vpc_id} is not properly configured: {error_msg}\n"
-                        f"The VPC needs:\n"
-                        f"  1. Subnets (for instance placement)\n"
-                        f"  2. Internet gateway (for outbound connectivity)\n"
-                        f"  3. Route table with route to internet gateway (for public access)\n"
-                        f"Fix with: aws ec2 create-default-vpc --region {self.aws_config.get('region_name', 'ap-southeast-2')}"
-                    )
+                    log(f"VPC {vpc_id} needs repair: {error_msg} — attempting auto-repair...")
+                    self._repair_vpc(ec2, vpc_id)
+                    is_valid, error_msg = self._validate_vpc(ec2, vpc_id)
+                    if not is_valid:
+                        region = self.aws_config.get("region_name", "ap-southeast-2")
+                        error(
+                            f"VPC {vpc_id} could not be auto-repaired: {error_msg}\n"
+                            f"Fix manually:\n"
+                            f"  aws ec2 create-internet-gateway --region {region}\n"
+                            f"  aws ec2 attach-internet-gateway --internet-gateway-id <igw-id> --vpc-id {vpc_id} --region {region}\n"
+                            f"  aws ec2 describe-route-tables --filters Name=vpc-id,Values={vpc_id} Name=association.main,Values=true --region {region}\n"
+                            f"  aws ec2 create-route --route-table-id <rtb-id> --destination-cidr-block 0.0.0.0/0 --gateway-id <igw-id> --region {region}"
+                        )
 
                 log(f"Using VPC: '{vpc_id}'")
 
@@ -915,6 +1024,7 @@ class AWSProvider:
 
         key_name = self._ensure_ssh_key(ec2)
         sg_id = self._ensure_security_group(ec2)
+        subnet_id = self._get_public_subnet_for_sg(ec2, sg_id)
 
         log(f"Creating EC2 instance '{name}' ({vm_size})...")
 
@@ -922,7 +1032,6 @@ class AWSProvider:
             "ImageId": ami_id,
             "InstanceType": vm_size,
             "KeyName": key_name,
-            "SecurityGroupIds": [sg_id],
             "MinCount": 1,
             "MaxCount": 1,
             "TagSpecifications": [
@@ -940,6 +1049,17 @@ class AWSProvider:
                 }
             ],
         }
+
+        if subnet_id:
+            # Non-default VPC: specify subnet + security group via NetworkInterfaces
+            run_params["NetworkInterfaces"] = [{
+                "DeviceIndex": 0,
+                "SubnetId": subnet_id,
+                "Groups": [sg_id],
+                "AssociatePublicIpAddress": True,
+            }]
+        else:
+            run_params["SecurityGroupIds"] = [sg_id]
 
         if instance_profile_name:
             run_params["IamInstanceProfile"] = {"Name": instance_profile_name}
