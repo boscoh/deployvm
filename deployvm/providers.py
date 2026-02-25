@@ -464,6 +464,18 @@ class AWSProvider:
 
     def validate_auth(self) -> None:
         check_aws_auth(self.aws_config.get("profile_name"))
+        session = self._get_session()
+        sts = session.client("sts", region_name=self.region)
+        identity = sts.get_caller_identity()
+        account_id = identity.get("Account", "unknown")
+        profile = self.aws_config.get("profile_name", "default")
+        try:
+            iam = session.client("iam")
+            aliases = iam.list_account_aliases().get("AccountAliases", [])
+            account_name = aliases[0] if aliases else account_id
+        except Exception:
+            account_name = account_id
+        log(f"AWS: region={self.region}  profile={profile}  account={account_name}")
 
     def _get_ec2_client(self):
         return self._get_session().client("ec2")
