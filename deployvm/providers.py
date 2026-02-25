@@ -470,7 +470,7 @@ class AWSProvider:
         sts = session.client("sts", region_name=self.region)
         identity = sts.get_caller_identity()
         account_id = identity.get("Account", "unknown")
-        profile = self.aws_config.get("profile_name", "default")
+        profile = self.aws_config.get("profile_name") or identity.get("Arn", "instance-role").split("/")[-1]
         try:
             iam = session.client("iam")
             aliases = iam.list_account_aliases().get("AccountAliases", [])
@@ -939,7 +939,7 @@ class AWSProvider:
             log(f"Attached AmazonBedrockFullAccess policy to '{role_name}'")
         except ClientError as e:
             if e.response["Error"]["Code"] != "EntityAlreadyExists":
-                pass
+                raise
 
         profile_name = role_name
         try:
@@ -967,7 +967,7 @@ class AWSProvider:
             log(f"Added role '{role_name}' to instance profile")
         except ClientError as e:
             if e.response["Error"]["Code"] != "LimitExceeded":
-                pass
+                raise
 
         max_attempts = 10
         for attempt in range(max_attempts):
