@@ -63,6 +63,8 @@ class Provider(Protocol):
     def cleanup_resources(self, *, dry_run: bool = True) -> None: ...
 
     def open_firewall_port(self, port: int) -> None: ...
+    
+    def block_firewall_port(self, port: int) -> None: ...
 
 
 def _get_my_ip() -> str | None:
@@ -326,6 +328,9 @@ class DigitalOceanProvider:
         log("No cleanup operations available for DigitalOcean provider")
 
     def open_firewall_port(self, port: int) -> None:
+        pass  # DigitalOcean uses UFW only, no cloud-level firewall
+    
+    def block_firewall_port(self, port: int) -> None:
         pass  # DigitalOcean uses UFW only, no cloud-level firewall
 
 
@@ -891,71 +896,83 @@ class AWSProvider:
         return self._get_session().client("iam")
 
     def _ensure_iam_role_and_profile(self, role_name: str) -> str:
-        """Ensure IAM role and instance profile exist with Bedrock access.
+        """Ensure IAM role and instance profile exist.
 
-        Creates or retrieves an IAM role with EC2 trust policy, attaches the
-        AmazonBedrockFullAccess managed policy, creates an instance profile with
-        the same name, and associates the role with the profile. Waits for the
-        profile to be fully propagated before returning.
+        Creates or retrieves an IAM role with EC2 trust policy, creates an instance 
+        profile with the same name, and associates the role with the profile. Waits 
+        for the profile to be fully propagated before returning.
 
         :param role_name: Name for both the IAM role and instance profile
         :return: Instance profile name (same as role_name)
         """
         iam = self._get_iam_client()
 
-        trust_policy = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Principal": {"Service": "ec2.amazonaws.com"},
-                    "Action": "sts:AssumeRole"
-                }
-            ]
-        }
-
+        # Check if role already exists first
+        role_exists = False
         try:
             iam.get_role(RoleName=role_name)
+            role_exists = True
             log(f"Using existing IAM role: '{role_name}'")
         except ClientError as e:
-            if e.response["Error"]["Code"] == "NoSuchEntity":
-                log(f"Creating IAM role: '{role_name}'")
+            if e.response["Error"]["Code"] == "AccessDenied":
+                raise RuntimeError(
+                    f"No IAM permissions to access role '{role_name}'. "
+                    f"Ask an admin to create an IAM instance profile, "
+                    f"then use --iam-profile <profile-name> to reference it directly."
+                ) from e
+            elif e.response["Error"]["Code"] != "NoSuchEntity":
+                raise
+
+        if not role_exists:
+            trust_policy = {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"Service": "ec2.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }
+                ]
+            }
+
+            try:
                 iam.create_role(
                     RoleName=role_name,
                     AssumeRolePolicyDocument=json.dumps(trust_policy),
-                    Description=f"Role for deploy-vm managed instances (Bedrock access)",
+                    Description=f"Role for deploy-vm managed instances",
                     Tags=[
                         {"Key": "ManagedBy", "Value": "deploy-vm"},
                         {"Key": "CreatedAt", "Value": datetime.now(timezone.utc).isoformat()},
                     ]
                 )
                 log(f"Created IAM role: '{role_name}'")
-            else:
-                raise
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "EntityAlreadyExists":
+                    log(f"Using existing IAM role: '{role_name}'")
+                elif e.response["Error"]["Code"] == "AccessDenied":
+                    raise RuntimeError(
+                        f"No IAM permissions to create role '{role_name}'. "
+                        f"Ask an admin to create an IAM instance profile, "
+                        f"then use --iam-profile <profile-name> to reference it directly."
+                    ) from e
+                else:
+                    raise
 
-        bedrock_policy_arn = "arn:aws:iam::aws:policy/AmazonBedrockFullAccess"
-        try:
-            iam.attach_role_policy(RoleName=role_name, PolicyArn=bedrock_policy_arn)
-            log(f"Attached AmazonBedrockFullAccess policy to '{role_name}'")
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "EntityAlreadyExists":
-                raise
+        # Skip Bedrock policy attachment to avoid permission issues
 
         profile_name = role_name
         try:
-            iam.get_instance_profile(InstanceProfileName=profile_name)
-            log(f"Using existing instance profile: '{profile_name}'")
+            iam.create_instance_profile(
+                InstanceProfileName=profile_name,
+                Tags=[
+                    {"Key": "ManagedBy", "Value": "deploy-vm"},
+                    {"Key": "CreatedAt", "Value": datetime.now(timezone.utc).isoformat()},
+                ]
+            )
+            log(f"Created instance profile: '{profile_name}'")
         except ClientError as e:
-            if e.response["Error"]["Code"] == "NoSuchEntity":
-                log(f"Creating instance profile: '{profile_name}'")
-                iam.create_instance_profile(
-                    InstanceProfileName=profile_name,
-                    Tags=[
-                        {"Key": "ManagedBy", "Value": "deploy-vm"},
-                        {"Key": "CreatedAt", "Value": datetime.now(timezone.utc).isoformat()},
-                    ]
-                )
-                log(f"Created instance profile: '{profile_name}'")
+            if e.response["Error"]["Code"] == "EntityAlreadyExists":
+                log(f"Using existing instance profile: '{profile_name}'")
             else:
                 raise
 
@@ -966,7 +983,7 @@ class AWSProvider:
             )
             log(f"Added role '{role_name}' to instance profile")
         except ClientError as e:
-            if e.response["Error"]["Code"] != "LimitExceeded":
+            if e.response["Error"]["Code"] not in ("LimitExceeded", "NoSuchEntity"):
                 raise
 
         max_attempts = 10
@@ -1019,7 +1036,12 @@ class AWSProvider:
         }
 
     def create_instance(
-        self, name: str, region: str, vm_size: str, iam_role: str | None = None
+        self,
+        name: str,
+        region: str,
+        vm_size: str,
+        iam_role: str | None = None,
+        iam_profile: str | None = None,
     ) -> dict:
         self.validate_auth()
 
@@ -1033,7 +1055,10 @@ class AWSProvider:
 
         # Setup IAM role if specified
         instance_profile_name = None
-        if iam_role:
+        if iam_profile:
+            instance_profile_name = iam_profile
+            log(f"Using IAM instance profile: '{iam_profile}'")
+        elif iam_role:
             instance_profile_name = self._ensure_iam_role_and_profile(iam_role)
 
         key_name = self._ensure_ssh_key(ec2)
@@ -1303,6 +1328,38 @@ class AWSProvider:
             }],
         )
         log(f"Opened port {port} in AWS security group")
+    
+    def block_firewall_port(self, port: int) -> None:
+        """Block a TCP port in the AWS deploy-vm-web security group.
+        
+        :param port: TCP port number to block from 0.0.0.0/0
+        """
+        ec2 = self._get_ec2_client()
+        response = ec2.describe_security_groups(
+            Filters=[{"Name": "group-name", "Values": ["deploy-vm-web"]}]
+        )
+        if not response["SecurityGroups"]:
+            return
+        sg_id = response["SecurityGroups"][0]["GroupId"]
+        sg = ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]
+        
+        # Find and remove the rule for this port
+        rule_to_remove = None
+        for rule in sg["IpPermissions"]:
+            if (
+                rule.get("IpProtocol") == "tcp"
+                and rule.get("FromPort") == port
+                and rule.get("ToPort") == port
+            ):
+                rule_to_remove = rule
+                break
+        
+        if rule_to_remove:
+            ec2.revoke_security_group_ingress(
+                GroupId=sg_id,
+                IpPermissions=[rule_to_remove]
+            )
+            log(f"Blocked port {port} in AWS security group")
 
 
 class VultrProvider:
@@ -1711,6 +1768,31 @@ class VultrProvider:
             "--size", "0",
         )
         log(f"Opened port {port} in Vultr firewall group")
+    
+    def block_firewall_port(self, port: int) -> None:
+        """Block a TCP port in the Vultr deploy-vm-web firewall group.
+        
+        :param port: TCP port number to block from 0.0.0.0/0
+        """
+        result = run_cmd_json("vultr-cli", "firewall", "group", "list")
+        groups = result.get("firewall_groups") or []
+        group = next((g for g in groups if g.get("description") == "deploy-vm-web"), None)
+        if not group:
+            return
+        group_id = group["id"]
+        rules_result = run_cmd_json("vultr-cli", "firewall", "rule", "list", group_id)
+        rules = rules_result.get("firewall_rules") or []
+        
+        # Find and delete the rule for this port
+        rule_to_delete = None
+        for rule in rules:
+            if str(rule.get("port")) == str(port):
+                rule_to_delete = rule
+                break
+        
+        if rule_to_delete:
+            run_cmd("vultr-cli", "firewall", "rule", "delete", group_id, str(rule_to_delete["id"]))
+            log(f"Blocked port {port} in Vultr firewall group")
 
 
 def check_aws_auth(profile: str | None = None) -> None:

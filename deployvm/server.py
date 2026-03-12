@@ -387,6 +387,37 @@ def resolve_dns_a(domain: str, nameserver: str = "8.8.8.8") -> str | None:
         return None
 
 
+def resolve_authoritative_ns_ip(domain: str) -> str | None:
+    """Return the IP of the first authoritative nameserver for a domain.
+
+    :return: IP address string or None if lookup fails
+    """
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = ["8.8.8.8"]
+        ns_answer = resolver.resolve(domain, "NS")
+        ns_hostname = str(ns_answer[0]).rstrip(".")
+        a_answer = resolver.resolve(ns_hostname, "A")
+        return str(a_answer[0]) if a_answer else None
+    except Exception:
+        return None
+
+
+def resolve_dns_ns(domain: str, nameserver: str = "8.8.8.8") -> set[str]:
+    """Resolve NS records for a domain.
+
+    :param nameserver: DNS nameserver IP to query (default: 8.8.8.8)
+    :return: Set of nameserver hostnames (lowercase, no trailing dot), empty set on failure
+    """
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = [nameserver]
+        answer = resolver.resolve(domain, "NS")
+        return {str(r).lower().rstrip(".") for r in answer}
+    except Exception:
+        return set()
+
+
 def check_http_status(url: str, timeout: int = 5) -> tuple[int | None, str]:
     """:return: (status_code, response_text) or (None, error_message)"""
     try:
@@ -631,6 +662,7 @@ def ensure_web_firewall(
     ssh_user: str = "deploy",
     extra_port: int | None = None,
     provider=None,
+    ssl_only: bool = False,
 ):
     """Ensure firewall allows HTTP (80), HTTPS (443), and an optional extra port.
 
@@ -639,34 +671,66 @@ def ensure_web_firewall(
 
     :param extra_port: Additional TCP port to open (e.g. custom outgoing_port)
     :param provider: Cloud provider instance for updating cloud-level firewall rules
+    :param ssl_only: If True, block port 80 at firewall level for enhanced security
     """
     log("Checking firewall...")
     result = ssh(ip, "sudo ufw status", user=ssh_user)
-    needs_80 = "80/tcp" not in result
-    needs_443 = "443/tcp" not in result
-    needs_extra = (
-        extra_port is not None
-        and extra_port not in (80, 443)
-        and f"{extra_port}/tcp" not in result
-    )
-
-    if needs_80 or needs_443 or needs_extra:
-        log("Opening web ports in firewall...")
-        cmds = []
-        if needs_80:
-            cmds.append("sudo ufw allow 80/tcp")
-        if needs_443:
-            cmds.append("sudo ufw allow 443/tcp")
-        if needs_extra:
-            cmds.append(f"sudo ufw allow {extra_port}/tcp")
-        cmds.append("sudo ufw reload")
-        ssh_script(ip, " && ".join(cmds), user=ssh_user)
-        log("Firewall updated")
+    
+    if ssl_only:
+        # SSL-only mode: block port 80, only allow 443
+        needs_block_80 = "80/tcp" in result and "ALLOW" in result
+        needs_443 = "443/tcp" not in result
+        needs_extra = (
+            extra_port is not None
+            and extra_port not in (80, 443)
+            and f"{extra_port}/tcp" not in result
+        )
+        
+        if needs_block_80 or needs_443 or needs_extra:
+            log("Configuring SSL-only firewall (blocking HTTP port 80)...")
+            cmds = []
+            if needs_block_80:
+                cmds.append("sudo ufw delete allow 80/tcp")
+                cmds.append("sudo ufw deny 80/tcp")
+            if needs_443:
+                cmds.append("sudo ufw allow 443/tcp")
+            if needs_extra:
+                cmds.append(f"sudo ufw allow {extra_port}/tcp")
+            cmds.append("sudo ufw reload")
+            ssh_script(ip, " && ".join(cmds), user=ssh_user)
+            log("SSL-only firewall configured")
+        else:
+            log("SSL-only firewall OK")
     else:
-        log("Firewall OK")
+        # Normal mode: allow both 80 and 443
+        needs_80 = "80/tcp" not in result
+        needs_443 = "443/tcp" not in result
+        needs_extra = (
+            extra_port is not None
+            and extra_port not in (80, 443)
+            and f"{extra_port}/tcp" not in result
+        )
 
-    if provider is not None and extra_port is not None and extra_port not in (80, 443):
-        provider.open_firewall_port(extra_port)
+        if needs_80 or needs_443 or needs_extra:
+            log("Opening web ports in firewall...")
+            cmds = []
+            if needs_80:
+                cmds.append("sudo ufw allow 80/tcp")
+            if needs_443:
+                cmds.append("sudo ufw allow 443/tcp")
+            if needs_extra:
+                cmds.append(f"sudo ufw allow {extra_port}/tcp")
+            cmds.append("sudo ufw reload")
+            ssh_script(ip, " && ".join(cmds), user=ssh_user)
+            log("Firewall updated")
+        else:
+            log("Firewall OK")
+
+    if provider is not None:
+        if extra_port is not None and extra_port not in (80, 443):
+            provider.open_firewall_port(extra_port)
+        if ssl_only:
+            provider.block_firewall_port(80)
 
 
 def ensure_dns_matches(
@@ -676,6 +740,21 @@ def ensure_dns_matches(
     aws_profile: str | None = None,
 ) -> bool:
     from deployvm.providers import get_provider
+
+    p = get_provider(provider_name, aws_profile=aws_profile)
+
+    # Check that the domain's registrar NS records point to this provider
+    provider_ns = {ns.lower().rstrip(".") for ns in p.get_nameservers(domain)}
+    actual_ns = resolve_dns_ns(domain)
+    if actual_ns and actual_ns.isdisjoint(provider_ns):
+        warn(
+            f"Nameserver mismatch for '{domain}': registrar NS records point to {actual_ns}, "
+            f"not {provider_name} ({provider_ns})"
+        )
+        warn(
+            f"Update your domain registrar to use these nameservers: {sorted(provider_ns)}"
+        )
+        warn("DNS changes via this provider will have no effect until nameservers are updated")
 
     current_ip = resolve_dns_a(domain) or ""
 
@@ -687,7 +766,6 @@ def ensure_dns_matches(
     )
     profile_info = f" (profile: {aws_profile})" if aws_profile else ""
     log(f"Updating DNS via {provider_name}{profile_info}...")
-    p = get_provider(provider_name, aws_profile=aws_profile)
     p.setup_dns(domain, expected_ip)
     log("DNS updated (may take a few minutes to propagate)")
     return True
@@ -698,10 +776,12 @@ def generate_nginx_server_block(
     port: int,
     static_dir: str | None = None,
     listen: str = "80",
+    ssl_only: bool = False,
 ) -> str:
     """Generate nginx server block.
 
     :param static_dir: If provided, nginx serves static files and proxies non-static requests
+    :param ssl_only: If True, only listen on HTTPS (443) and block HTTP entirely
     """
     proxy_block = (
         dedent("""
@@ -737,25 +817,44 @@ def generate_nginx_server_block(
             }}
         """).strip()
 
-    return dedent(f"""
-        server {{
-            listen {listen};
-            server_name {server_name};
+    if ssl_only:
+        # SSL-only mode: block HTTP entirely, only serve HTTPS
+        return dedent(f"""
+            # Block HTTP entirely when SSL-only mode is enabled
+            server {{
+                listen 80;
+                server_name {server_name};
+                return 444;  # Drop connection without response
+            }}
+            
+            server {{
+                listen {listen};
+                server_name {server_name};
 
-            {location_block}
-        }}
-    """).strip()
+                {location_block}
+            }}
+        """).strip()
+    else:
+        return dedent(f"""
+            server {{
+                listen {listen};
+                server_name {server_name};
+
+                {location_block}
+            }}
+        """).strip()
 
 
 def setup_nginx_ip(
     ip: str,
     *,
-    app_name: str = "default",
+    app_name: str = "app",
     port: int = 3000,
     outgoing_port: int = 80,
     static_dir: str | None = None,
     ssh_user: str = "deploy",
     provider=None,
+    ssl_only: bool = False,
 ):
     """Setup nginx for IP-only access (no SSL).
 
@@ -764,12 +863,10 @@ def setup_nginx_ip(
     :param outgoing_port: External port nginx listens on (default: 80)
     :param provider: Cloud provider instance for updating cloud-level firewall rules
     """
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider)
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=ssl_only)
 
-    # Use default_server only for the primary app on port 80
-    listen_directive = f"{outgoing_port} default_server" if app_name == "default" else str(outgoing_port)
     server_block = generate_nginx_server_block(
-        "_", port, static_dir, listen=listen_directive
+        "_", port, static_dir, listen=f"{outgoing_port} default_server", ssl_only=ssl_only
     )
 
     log(f"Setting up nginx for IP access on '{ip}' port {outgoing_port} (app: {app_name})...")
@@ -781,7 +878,9 @@ def setup_nginx_ip(
     )
     ssh_script(
         ip,
-        f"sudo ln -sf /etc/nginx/sites-available/{app_name} /etc/nginx/sites-enabled/{app_name} && sudo nginx -t && sudo systemctl reload nginx",
+        f"sudo rm -f /etc/nginx/sites-enabled/default && "
+        f"sudo ln -sf /etc/nginx/sites-available/{app_name} /etc/nginx/sites-enabled/{app_name} && "
+        f"sudo nginx -t && sudo systemctl reload nginx",
         user=ssh_user,
     )
 
@@ -804,6 +903,7 @@ def setup_nginx_ssl(
     provider_name: ProviderName = "digitalocean",
     aws_profile: str | None = None,
     provider=None,
+    ssl_only: bool = False,
 ):
     """Setup nginx and SSL certificate.
 
@@ -813,7 +913,31 @@ def setup_nginx_ssl(
         is configured to also listen on that port after the certificate is issued.
     :param provider: Cloud provider instance for updating cloud-level firewall rules
     """
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider)
+    # SSL-only mode requires special handling for certificate provisioning
+    if ssl_only:
+        # Check if SSL certificate already exists
+        cert_check_cmd = f"test -d /etc/letsencrypt/live/{domain} && echo 'EXISTS' || echo 'MISSING'"
+        cert_exists = ssh(ip, cert_check_cmd, user=ssh_user).strip()
+        
+        if cert_exists == 'MISSING':
+            log("🔒 SSL lockdown requested but certificate missing. Using automatic two-phase deployment:")
+            log("📋 Phase 1: Setting up SSL certificate with temporary HTTP access...")
+            
+            # Phase 1: Setup SSL certificate with HTTP access
+            ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=False)
+            _setup_ssl_certificate_phase(ip, domain, email, port, outgoing_port, static_dir, skip_dns, staging, ssh_user, provider_name, aws_profile)
+            
+            log("🔒 Phase 2: Applying SSL lockdown (blocking HTTP access)...")
+            # Phase 2: Apply SSL lockdown
+            ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=True)
+            _apply_ssl_lockdown_phase(ip, domain, port, static_dir, outgoing_port, ssh_user)
+            
+            log("✅ SSL lockdown deployment complete! HTTPS-only access enabled.")
+            return
+        else:
+            log("✅ SSL certificate exists. Applying SSL lockdown directly...")
+    
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=ssl_only)
     if not skip_dns:
         ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
 
@@ -825,7 +949,7 @@ def setup_nginx_ssl(
     )
 
     server_block = generate_nginx_server_block(
-        f"{domain} www.{domain}", port, static_dir
+        f"{domain} www.{domain}", port, static_dir, ssl_only=ssl_only
     )
 
     profile_info = f" (profile: {aws_profile})" if aws_profile else ""
@@ -844,8 +968,10 @@ def setup_nginx_ssl(
     )
 
     log("Verifying DNS...")
+    auth_ns_ip = resolve_authoritative_ns_ip(domain)
     for i in range(DNS_VERIFY_RETRIES):
-        resolved = resolve_dns_a(domain)
+        # Check authoritative NS first (instant for Route53), then public resolver
+        resolved = (auth_ns_ip and resolve_dns_a(domain, auth_ns_ip)) or resolve_dns_a(domain)
         if resolved == ip:
             log(f"DNS verified: '{domain}' -> '{ip}'")
             break
@@ -854,7 +980,8 @@ def setup_nginx_ssl(
     else:
         error("DNS verification timeout")
 
-    verify_http(ip, domain=domain)
+    if not ssl_only:
+        verify_http(ip, domain=domain)
 
     log("Obtaining SSL certificate...")
     staging_flag = "--staging " if staging else ""
@@ -897,7 +1024,7 @@ def setup_nginx_ssl(
         " do sudo rm -f \"$f\"; done",
         user=ssh_user,
     )
-    ip_block = generate_nginx_server_block("_", port, static_dir, listen="80")
+    ip_block = generate_nginx_server_block("_", port, static_dir, listen="80", ssl_only=ssl_only)
     ssh_write_file(ip, "/etc/nginx/sites-available/ip-access", ip_block, user=ssh_user)
     ssh_script(
         ip,
@@ -908,6 +1035,107 @@ def setup_nginx_ssl(
 
     port_suffix = f":{outgoing_port}" if outgoing_port != 443 else ""
     log(f"SSL configured! http://{ip} and https://{domain}{port_suffix}")
+
+
+def probe_domain(ip: str, domain: str, port: int = 443) -> None:
+    """Probe whether a deployed instance connects to a domain as configured by deployvm ssl.
+
+    Checks DNS resolution, HTTP redirect, HTTPS connectivity, and SSL certificate validity.
+
+    :param ip: Instance IP address
+    :param domain: Domain name to probe
+    :param port: HTTPS port to check (default: 443)
+    """
+    import socket
+    import ssl
+    from datetime import datetime, timezone
+
+    print(f"Probing '{domain}' -> '{ip}' (port {port})...")
+    print("-" * 40)
+    issues = []
+
+    # DNS
+    dns_ip = resolve_dns_a(domain)
+    if dns_ip == ip:
+        print(f"[OK] DNS: '{domain}' -> '{ip}'")
+    elif dns_ip:
+        print(f"[FAIL] DNS: '{domain}' -> '{dns_ip}' (expected '{ip}')")
+        issues.append(f"DNS mismatch: points to '{dns_ip}', expected '{ip}'")
+    else:
+        print(f"[FAIL] DNS: '{domain}' -> no A record found")
+        issues.append("DNS: no A record found")
+
+    # HTTP (should redirect to HTTPS after certbot --redirect)
+    http_status, http_response = check_http_status(f"http://{domain}")
+    if http_status in (301, 302):
+        print(f"[OK] HTTP: redirects to HTTPS ({http_status})")
+    elif http_status == 200:
+        print(f"[WARN] HTTP: returns 200 (no redirect to HTTPS configured)")
+    elif http_status:
+        print(f"[WARN] HTTP: '{http_response}'")
+    else:
+        print(f"[FAIL] HTTP: '{http_response}'")
+        issues.append("HTTP not reachable")
+
+    # HTTPS connectivity
+    https_url = f"https://{domain}" if port == 443 else f"https://{domain}:{port}"
+    https_status, https_response = check_http_status(https_url)
+    if https_status == 200:
+        print(f"[OK] HTTPS: '{https_url}' responding (200)")
+    elif https_status:
+        print(f"[WARN] HTTPS: '{https_response}'")
+    else:
+        print(f"[FAIL] HTTPS: '{https_response}'")
+        issues.append(f"HTTPS not reachable at '{https_url}'")
+
+    # SSL certificate
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((domain, port), timeout=10) as sock:
+            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+
+        not_after_str = cert.get("notAfter", "")
+        if not_after_str:
+            not_after = datetime.strptime(not_after_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            days_remaining = (not_after - datetime.now(timezone.utc)).days
+            expiry_date = not_after.strftime("%Y-%m-%d")
+            if days_remaining > 14:
+                print(f"[OK] SSL cert: valid, expires in {days_remaining} days ({expiry_date})")
+            elif days_remaining > 0:
+                print(f"[WARN] SSL cert: expires soon in {days_remaining} days ({expiry_date})")
+                issues.append(f"SSL certificate expires in {days_remaining} days")
+            else:
+                print(f"[FAIL] SSL cert: expired {-days_remaining} days ago ({expiry_date})")
+                issues.append("SSL certificate expired")
+
+        san_list = [v for t, v in cert.get("subjectAltName", []) if t == "DNS"]
+        apex = ".".join(domain.split(".")[-2:])
+        wildcard = f"*.{apex}"
+        if domain in san_list or wildcard in san_list:
+            san_display = ", ".join(san_list[:3]) + ("..." if len(san_list) > 3 else "")
+            print(f"[OK] SSL cert: covers '{domain}' (SAN: {san_display})")
+        else:
+            print(f"[WARN] SSL cert: SAN does not include '{domain}' ({san_list})")
+            issues.append("SSL certificate SAN mismatch")
+
+    except ssl.SSLCertVerificationError as e:
+        print(f"[FAIL] SSL cert: verification failed — {e}")
+        issues.append(f"SSL certificate invalid: {e}")
+    except ConnectionRefusedError:
+        print(f"[FAIL] SSL: connection refused on port {port}")
+        issues.append(f"HTTPS port {port} not reachable")
+    except Exception as e:
+        print(f"[FAIL] SSL: {e}")
+        issues.append(f"SSL check failed: {e}")
+
+    print("-" * 40)
+    if issues:
+        print(f"Issues found ({len(issues)}):")
+        for issue in issues:
+            print(f"  - {issue}")
+    else:
+        print("All checks passed!")
 
 
 def verify_instance(
@@ -998,3 +1226,161 @@ def verify_instance(
             print(f"  - {issue}")
     else:
         print("All checks passed!")
+
+
+def _setup_ssl_certificate_phase(
+    ip: str,
+    domain: str,
+    email: str,
+    port: int,
+    outgoing_port: int,
+    static_dir: str | None,
+    skip_dns: bool,
+    staging: bool,
+    ssh_user: str,
+    provider_name: str,
+    aws_profile: str | None,
+):
+    """Phase 1 of SSL lockdown: Setup SSL certificate with HTTP access allowed.
+    
+    This is extracted from the main setup_nginx_ssl function to handle
+    the two-phase deployment for SSL lockdown mode.
+    """
+    if not skip_dns:
+        ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
+
+    # Remove default site so it doesn't conflict with domain-based config
+    ssh_script(
+        ip,
+        "sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true",
+        user=ssh_user,
+    )
+
+    # Create normal SSL-ready nginx config (without SSL-only blocking)
+    server_block = generate_nginx_server_block(
+        f"{domain} www.{domain}", port, static_dir, ssl_only=False
+    )
+
+    log(f"Setting up nginx for '{domain}' (certificate provisioning phase)...")
+    ssh_script(
+        ip, "sudo apt-get update && sudo apt-get install -y nginx", user=ssh_user
+    )
+    ssh_write_file(
+        ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user
+    )
+    ssh_script(
+        ip,
+        f"sudo ln -sf /etc/nginx/sites-available/{domain} /etc/nginx/sites-enabled/ && "
+        f"sudo nginx -t && sudo systemctl reload nginx",
+        user=ssh_user,
+    )
+
+    log("Verifying DNS...")
+    auth_ns_ip = resolve_authoritative_ns_ip(domain)
+    for i in range(DNS_VERIFY_RETRIES):
+        resolved = (auth_ns_ip and resolve_dns_a(domain, auth_ns_ip)) or resolve_dns_a(domain)
+        if resolved == ip:
+            log(f"DNS verified: '{domain}' -> '{ip}'")
+            break
+        warn(f"Waiting for DNS... ({i + 1}/{DNS_VERIFY_RETRIES})")
+        time.sleep(DNS_VERIFY_DELAY)
+    else:
+        error("DNS verification timeout")
+
+    # Verify HTTP connectivity before certificate issuance
+    verify_http(ip, domain=domain)
+
+    log("Obtaining SSL certificate...")
+    staging_flag = "--staging " if staging else ""
+    ssl_script = dedent(f"""
+        set -e
+        sudo apt-get install -y certbot python3-certbot-nginx
+        if [ -d "/etc/letsencrypt/live/{domain}" ]; then
+            echo "Certificate exists, renewing if needed..."
+            sudo certbot --nginx {staging_flag}-d {domain} -d www.{domain} \\
+                --non-interactive --agree-tos --email {email} \\
+                --redirect --keep-until-expiring
+        else
+            echo "Issuing new certificate..."
+            sudo certbot --nginx {staging_flag}-d {domain} -d www.{domain} \\
+                --non-interactive --agree-tos --email {email} --redirect
+        fi
+        sudo systemctl enable --now certbot.timer
+    """).strip()
+    ssh_script(ip, ssl_script, user=ssh_user)
+
+    # Handle custom SSL ports
+    if outgoing_port != 443:
+        log(f"Adding listen directive for custom SSL port {outgoing_port}...")
+        add_listen_script = dedent(f"""
+            set -e
+            CONFIG="/etc/nginx/sites-available/{domain}"
+            # Insert 'listen <port> ssl;' after the existing 'listen 443 ssl;' line
+            sudo sed -i '/listen 443 ssl;/a\\    listen {outgoing_port} ssl;' "$CONFIG"
+            sudo nginx -t && sudo systemctl reload nginx
+        """).strip()
+        ssh_script(ip, add_listen_script, user=ssh_user)
+
+
+def _apply_ssl_lockdown_phase(
+    ip: str,
+    domain: str,
+    port: int,
+    static_dir: str | None,
+    outgoing_port: int,
+    ssh_user: str,
+):
+    """Phase 2 of SSL lockdown: Apply HTTP blocking to existing SSL setup.
+    
+    This regenerates the nginx configuration with SSL-only blocking
+    and removes any HTTP access created by certbot.
+    """
+    log("Regenerating nginx configuration with SSL lockdown...")
+    
+    # Generate SSL-only server block (with HTTP blocking)
+    server_block = generate_nginx_server_block(
+        f"{domain} www.{domain}", port, static_dir, ssl_only=True, listen="443 ssl"
+    )
+    
+    # Write the new SSL-only configuration
+    ssh_write_file(
+        ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user
+    )
+    
+    # Handle custom SSL ports in SSL-only mode  
+    if outgoing_port != 443:
+        log(f"Adding custom SSL port {outgoing_port} to SSL-only configuration...")
+        add_listen_script = dedent(f"""
+            set -e
+            CONFIG="/etc/nginx/sites-available/{domain}"
+            # Add custom SSL port after 443 ssl
+            sudo sed -i '/listen 443 ssl;/a\\    listen {outgoing_port} ssl;' "$CONFIG"
+            sudo nginx -t && sudo systemctl reload nginx
+        """).strip()
+        ssh_script(ip, add_listen_script, user=ssh_user)
+    
+    # Reload nginx with SSL-only configuration
+    ssh_script(
+        ip,
+        f"sudo nginx -t && sudo systemctl reload nginx",
+        user=ssh_user,
+    )
+    
+    # Setup IP access fallback with SSL-only blocking
+    log("Configuring IP access fallback with SSL lockdown...")
+    ssh_script(
+        ip,
+        "for f in $(grep -rl 'server_name _' /etc/nginx/sites-enabled/ 2>/dev/null);"
+        " do sudo rm -f \"$f\"; done",
+        user=ssh_user,
+    )
+    ip_block = generate_nginx_server_block("_", port, static_dir, listen="80", ssl_only=True)
+    ssh_write_file(ip, "/etc/nginx/sites-available/ip-access", ip_block, user=ssh_user)
+    ssh_script(
+        ip,
+        "sudo ln -sf /etc/nginx/sites-available/ip-access /etc/nginx/sites-enabled/ip-access"
+        " && sudo nginx -t && sudo systemctl reload nginx",
+        user=ssh_user,
+    )
+    
+    log("SSL lockdown applied successfully - HTTP access blocked at nginx level")

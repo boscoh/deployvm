@@ -40,11 +40,11 @@ class LogStream:
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             if line.strip():
-                logger.info(line)
+                logger.info(f"→ {line}")
 
     def flush(self) -> None:
         if self._buf.strip():
-            logger.info(self._buf)
+            logger.info(f"→ {self._buf}")
             self._buf = ""
 
 

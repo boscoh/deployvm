@@ -32,6 +32,7 @@ from .server import (
     get_instance_apps,
     is_valid_ip,
     load_instance,
+    probe_domain,
     resolve_instance,
     resolve_ip,
     save_instance,
@@ -68,7 +69,8 @@ def create_instance(
     user: str = "deploy",
     swap_size: str = "4G",
     no_setup: bool = False,
-    iam_role: str | None = None,
+    bedrock: bool = False,
+    iam_profile: str | None = None,
 ):
     """Create cloud instance and set it up.
 
@@ -78,18 +80,16 @@ def create_instance(
     :param os_image: OS image to use
     :param user: App user for running services
     :param no_setup: Skip firewall, swap, and user setup
-    :param iam_role: AWS only: IAM role name for instance profile (default: deploy-vm-bedrock)
+    :param bedrock: AWS only: create/attach deploy-vm-bedrock IAM role for Bedrock access
+    :param iam_profile: AWS only: use an existing IAM instance profile by name (skips IAM management)
     """
     p = get_provider(provider, region=region, os_image=os_image, vm_size=vm_size)
 
-    # Default IAM role for AWS instances (for Bedrock access)
-    if p.provider_name == "aws" and iam_role is None:
-        iam_role = "deploy-vm-bedrock"
-
+    iam_role = "deploy-vm-bedrock" if bedrock else None
     log(
         f"Creating instance '{name}' on '{p.provider_name}' in '{p.region}' ('{p.vm_size}')..."
     )
-    result = p.create_instance(name, p.region, p.vm_size, iam_role=iam_role)
+    result = p.create_instance(name, p.region, p.vm_size, iam_role=iam_role, iam_profile=iam_profile)
 
     instance_data = {
         "id": result["id"],
@@ -341,6 +341,7 @@ def nginx_ssl_command(
     """
     instance = resolve_instance(target)
     ip = instance["ip"]
+    _ensure_ssh_reachable(ip, ssh_user, instance)
     resolved_port, app_data = _select_nginx_app(instance, port, app_name)
 
     # Read static_dir from app entry as fallback
@@ -424,8 +425,8 @@ def sync_npm(
     _ensure_ssh_reachable(ip, ssh_user, instance)
 
     apps = [a for a in get_instance_apps(instance) if a["type"] == "npm"]
-    fallback = target if not is_valid_ip(target) else "npm"
-    app_name = resolve_app_name(apps, "npm", app_name, fallback)
+    fallback = target if not is_valid_ip(target) else "app"
+    app_name = resolve_app_name(apps, "app", app_name, fallback)
     app_data = next((a for a in apps if a["name"] == app_name), {})
     port = app_data.get("port", 3000)
 
@@ -462,8 +463,8 @@ def restart_pm2(
 
     apps = [app for app in get_instance_apps(instance) if app["type"] == "npm"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "npm"
-    app_name = resolve_app_name(apps, "npm", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "app"
+    app_name = resolve_app_name(apps, "app", app_name, fallback)
 
     npm_inst = NpmApp(instance, provider, user=user, app_name=app_name)
     npm_inst.restart()
@@ -505,8 +506,8 @@ def show_pm2_logs(
 
     apps = [app for app in get_instance_apps(instance) if app["type"] == "npm"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "npm"
-    app_name = resolve_app_name(apps, "npm", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "app"
+    app_name = resolve_app_name(apps, "app", app_name, fallback)
 
     npm_inst = NpmApp(instance, provider, user=user, app_name=app_name)
     print(npm_inst.logs(lines))
@@ -522,7 +523,7 @@ def deploy_npm(
     user: str = "deploy",
     port: int = 3000,
     outgoing_port: int | None = None,
-    app_name: str = "npm",
+    app_name: str = "app",
     provider: ProviderName = "digitalocean",
     region: str = "syd1",
     vm_size: str = "s-1vcpu-1gb",
@@ -535,6 +536,7 @@ def deploy_npm(
     build_command: str = "npm run build",
     dist_dir: str = ".output",
     static_subdir: str | None = None,
+    ssl_only: bool = False,
 ):
     """Deploy npm app with full infrastructure setup.
 
@@ -563,11 +565,15 @@ def deploy_npm(
     :param static_subdir: Path within app dir for nginx to serve static files directly.
         Defaults to {dist_dir}/public (Nuxt). Use {dist_dir}/client for SvelteKit/Remix,
         or {dist_dir} for a plain Vite app. Pass empty string to disable static serving.
+    :param ssl_only: Lock down HTTP access - block port 80 at firewall level for enhanced security
     """
     no_ssl = not domain
 
     if domain and not email:
         error("--email is required when --domain is set")
+    
+    if ssl_only and no_ssl:
+        error("--ssl-only requires --domain to be set (SSL-only mode requires SSL)")
 
     resolved_outgoing_port = outgoing_port if outgoing_port is not None else (80 if no_ssl else 443)
 
@@ -583,7 +589,7 @@ def deploy_npm(
             os_image=os_image,
             user=user,
             swap_size=swap_size,
-            iam_role=iam_role,
+            bedrock=bedrock,
         )
 
     data = load_instance(name)
@@ -619,14 +625,14 @@ def deploy_npm(
 
     aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
     provider = get_provider(data["provider"], aws_profile=aws_profile)
-    ensure_web_firewall(ip, ssh_user=npm_ssh_user, extra_port=resolved_outgoing_port, provider=provider)
+    ensure_web_firewall(ip, ssh_user=npm_ssh_user, extra_port=resolved_outgoing_port, provider=provider, ssl_only=ssl_only)
     if not no_ssl:
         ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
     _static_subdir = static_subdir if static_subdir is not None else f"{dist_dir}/public"
     npm_static_dir = f"/home/{user}/{app_name}/{_static_subdir}" if _static_subdir else None
     if no_ssl:
-        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=npm_static_dir, ssh_user=npm_ssh_user, provider=provider)
+        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=npm_static_dir, ssh_user=npm_ssh_user, provider=provider, ssl_only=ssl_only)
     else:
         setup_nginx_ssl(
             ip,
@@ -635,10 +641,11 @@ def deploy_npm(
             port=port,
             outgoing_port=resolved_outgoing_port,
             static_dir=npm_static_dir,
-            ssh_user=npm_ssh_user,
+            ssh_user=ssh_user,
             provider_name=data["provider"],
             aws_profile=aws_profile,
             provider=provider,
+            ssl_only=ssl_only,
         )
 
     log("Verifying deployment...")
@@ -693,8 +700,8 @@ def sync_uv(
     _ensure_ssh_reachable(ip, ssh_user, instance)
 
     apps = [a for a in get_instance_apps(instance) if a["type"] == "uv"]
-    fallback = target if not is_valid_ip(target) else "uv"
-    app_name = resolve_app_name(apps, "uv", app_name, fallback)
+    fallback = target if not is_valid_ip(target) else "app"
+    app_name = resolve_app_name(apps, "app", app_name, fallback)
     app_data = next((a for a in apps if a["name"] == app_name), {})
     port = app_data.get("port", 8000)
 
@@ -723,8 +730,8 @@ def restart_supervisor(
 
     apps = [app for app in get_instance_apps(instance) if app["type"] == "uv"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "uv"
-    app_name = resolve_app_name(apps, "uv", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "app"
+    app_name = resolve_app_name(apps, "app", app_name, fallback)
 
     user = instance.get("user", "deploy")
     uv_inst = UVApp(instance, provider, user=user, app_name=app_name)
@@ -763,8 +770,8 @@ def show_supervisor_logs(
 
     apps = [app for app in get_instance_apps(instance) if app["type"] == "uv"]
 
-    fallback = target if not target.replace(".", "").isdigit() else "uv"
-    app_name = resolve_app_name(apps, "uv", app_name, fallback)
+    fallback = target if not target.replace(".", "").isdigit() else "app"
+    app_name = resolve_app_name(apps, "app", app_name, fallback)
 
     user = instance.get("user", "deploy")
     uv_inst = UVApp(instance, provider, user=user, app_name=app_name)
@@ -782,14 +789,16 @@ def deploy_uv(
     user: str = "deploy",
     port: int = 8000,
     outgoing_port: int | None = None,
-    app_name: str = "uv",
+    app_name: str = "app",
     static_subdir: str | None = None,
     provider: ProviderName | None = None,
     region: str | None = None,
     vm_size: str | None = None,
     os_image: str | None = None,
     swap_size: str = "4G",
-    iam_role: str | None = None,
+    bedrock: bool = False,
+    iam_profile: str | None = None,
+    ssl_only: bool = False,
 ):
     """Deploy uv app with full infrastructure setup.
 
@@ -804,19 +813,24 @@ def deploy_uv(
     :param user: Remote user to run the app as (default: deploy)
     :param port: Port number for the app (default: 8000)
     :param outgoing_port: External port nginx listens on (default: 80 without SSL, 443 with SSL)
-    :param app_name: Name of the app (default: uv)
+    :param app_name: Name of the app (default: app)
     :param static_subdir: Subdirectory for static files to serve directly via nginx
     :param provider: Cloud provider (aws or digitalocean, default: digitalocean)
     :param region: Cloud provider region
     :param vm_size: Instance size (AWS: t3.micro, t3.small, etc. | DO: s-1vcpu-1gb, s-2vcpu-2gb, etc.)
     :param os_image: OS image name/ID
     :param swap_size: Swap file size (default: 4G)
-    :param iam_role: AWS only: IAM role name for instance profile (default: deploy-vm-bedrock)
+    :param bedrock: AWS only: create/attach deploy-vm-bedrock IAM role for Bedrock access
+    :param iam_profile: AWS only: use an existing IAM instance profile by name (skips IAM management)
+    :param ssl_only: Lock down HTTP access - block port 80 at firewall level for enhanced security
     """
     no_ssl = not domain
 
     if domain and not email:
         error("--email is required when --domain is set")
+    
+    if ssl_only and no_ssl:
+        error("--ssl-only requires --domain to be set (SSL-only mode requires SSL)")
 
     resolved_outgoing_port = outgoing_port if outgoing_port is not None else (80 if no_ssl else 443)
 
@@ -831,7 +845,6 @@ def deploy_uv(
     instance_file = Path(f"{name}.instance.json")
 
     if not instance_file.exists():
-        # IAM role will be set to default in create_instance for AWS
         create_instance(
             name,
             provider=provider,
@@ -840,7 +853,8 @@ def deploy_uv(
             os_image=os_image,
             user=user,
             swap_size=swap_size,
-            iam_role=iam_role,
+            bedrock=bedrock,
+            iam_profile=iam_profile,
         )
 
     data = load_instance(name)
@@ -871,13 +885,13 @@ def deploy_uv(
 
     aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
     provider = get_provider(data["provider"], aws_profile=aws_profile)
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=resolved_outgoing_port, provider=provider)
+    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=resolved_outgoing_port, provider=provider, ssl_only=ssl_only)
     if not no_ssl:
         ensure_dns_matches(domain, ip, provider_name=data["provider"], aws_profile=aws_profile)
 
     static_dir = f"/home/{user}/{app_name}/{static_subdir}" if static_subdir else None
     if no_ssl:
-        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=static_dir, ssh_user=ssh_user, provider=provider)
+        setup_nginx_ip(ip, app_name=app_name, port=port, outgoing_port=resolved_outgoing_port, static_dir=static_dir, ssh_user=ssh_user, provider=provider, ssl_only=ssl_only)
     else:
         setup_nginx_ssl(
             ip,
@@ -890,6 +904,7 @@ def deploy_uv(
             provider_name=data["provider"],
             aws_profile=aws_profile,
             provider=provider,
+            ssl_only=ssl_only,
         )
 
     log("Verifying deployment...")
@@ -947,6 +962,24 @@ def get_nameservers(
     print(json.dumps(nameservers))
 
 
+@app.command(name="probe", sort_key=6)
+def probe_command(
+    target: str,
+    domain: str,
+    *,
+    port: int = 443,
+):
+    """Probe whether a deployed instance connects to a domain (as configured by deployvm ssl).
+
+    Checks DNS resolution, HTTP redirect to HTTPS, HTTPS connectivity, and SSL certificate validity.
+
+    :param target: Instance name or IP address
+    :param domain: Domain name to probe
+    :param port: HTTPS port to check (default: 443)
+    """
+    instance = resolve_instance(target)
+    ip = instance["ip"]
+    probe_domain(ip, domain, port=port)
 
 
 if __name__ == "__main__":

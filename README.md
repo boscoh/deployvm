@@ -89,6 +89,38 @@ deployvm uv sync my-server /path/to/app "uv run uvicorn app:app --port 8000"
 
 ## Common Workflows
 
+### SSL Lockdown Mode
+
+For enhanced security, use `--ssl-only` to completely block HTTP access at both the firewall and nginx level:
+
+```bash
+# Deploy with SSL-only mode (blocks port 80 entirely)
+deployvm uv deploy my-server /path/to/app \
+    "uv run uvicorn app:app --port 8000" \
+    --port 8000 --domain example.com --email you@example.com \
+    --ssl-only
+
+# Multiple apps with SSL-only mode
+deployvm uv deploy my-server /path/to/api \
+    "uv run uvicorn app:app --port 8000" \
+    --port 8000 --app-name api \
+    --domain api.example.com --email you@example.com \
+    --ssl-only
+
+deployvm uv deploy my-server /path/to/worker \
+    "uv run worker --port 8001" \
+    --port 8001 --app-name worker \
+    --domain worker.example.com --email you@example.com \
+    --ssl-only
+```
+
+**SSL-only mode security features:**
+- Blocks port 80 at firewall level (UFW + cloud provider security groups)
+- Nginx returns connection drop (444) for any HTTP requests
+- Only HTTPS traffic allowed, no HTTP-to-HTTPS redirect
+- Compatible with multiple apps per instance
+- Certbot still works for SSL certificate provisioning
+
 ### Add SSL After Deployment
 
 ```bash
@@ -244,6 +276,7 @@ creates the DNS zone and A records, prints nameservers, waits for propagation, i
 - `--email <email>` (required with `--domain`)
 - `--app-name <name>`
 - `--iam-role <name>` (AWS only)
+- `--ssl-only` (block port 80 at firewall level for enhanced security)
 
 ## Requirements
 

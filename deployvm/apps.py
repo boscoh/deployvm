@@ -171,7 +171,7 @@ class NpmApp(BaseApp):
         provider_name: str,
         *,
         user: str,
-        app_name: str = "npm",
+        app_name: str = "app",
         port: int = 3000,
         node_version: int = 20,
         start_script: str = ".output/server/index.mjs",
@@ -494,7 +494,7 @@ class UVApp(BaseApp):
         provider_name: str,
         *,
         user: str,
-        app_name: str = "uv",
+        app_name: str = "app",
         port: int = 8000,
         command: str | None = None,
     ):
@@ -601,14 +601,25 @@ class UVApp(BaseApp):
         ssh_script(self.ip, venv_script, user=self.ssh_user)
 
         log("Configuring supervisord...")
-        # Validate command starts with 'uv'
-        if not self.command.strip().startswith("uv "):
-            error(f"Command must start with 'uv': {self.command}")
+        parts = self.command.strip().split()
+        env_pairs = []
+        i = 0
+        while i < len(parts) and "=" in parts[i] and not parts[i].startswith("uv"):
+            key, _, val = parts[i].partition("=")
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                env_pairs.append(f'{key}="{val}"')
+                i += 1
+            else:
+                break
+        cmd = " ".join(parts[i:])
+        if not cmd.startswith("uv "):
+            error(f"Command must start with 'uv' or leading KEY=value pairs then 'uv': {self.command}")
+        env_str = ",".join([f'PATH="/home/{self.user}/.local/bin:/usr/local/bin:/usr/bin:/bin"'] + env_pairs)
 
         supervisor_config = dedent(f"""
             [program:{self.app_name}]
             directory=/home/{self.user}/{self.app_name}
-            command={self.command}
+            command={cmd}
             user={self.user}
             autostart=true
             autorestart=true
@@ -616,7 +627,7 @@ class UVApp(BaseApp):
             killasgroup=true
             stderr_logfile=/var/log/{self.app_name}/error.log
             stdout_logfile=/var/log/{self.app_name}/access.log
-            environment=PATH="/home/{self.user}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+            environment={env_str}
         """).strip()
         ssh_write_file(
             self.ip,
