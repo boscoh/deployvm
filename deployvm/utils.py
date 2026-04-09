@@ -10,6 +10,12 @@ from rich.logging import RichHandler
 
 logger = logging.getLogger("deployvm")
 
+# Prefix for lines from remote SSH commands (Fabric streams, captured output, errors).
+REMOTE_OUTPUT_LOG_PREFIX = "→ "
+
+# Supplemental hints (registrar nameservers, follow-ups); not live remote output (→).
+EXTRA_OUTPUT_LOG_PREFIX = "extra | "
+
 # Pass to uvicorn.run(log_config=UVICORN_LOG_CONFIG) to prevent uvicorn from
 # installing its own StreamHandler, so all logs flow through our RichHandler.
 UVICORN_LOG_CONFIG = {
@@ -23,6 +29,56 @@ UVICORN_LOG_CONFIG = {
         "uvicorn.error": {"propagate": True, "level": "INFO"},
     },
 }
+
+
+def remote_line_for_log(line: str) -> str:
+    """:return: Log line with standard remote-output prefix."""
+    return f"{REMOTE_OUTPUT_LOG_PREFIX}{line}"
+
+
+def extra_line_for_log(line: str) -> str:
+    """:return: Log line with standard extra-hint prefix (registrar notes, etc.)."""
+    return f"{EXTRA_OUTPUT_LOG_PREFIX}{line}"
+
+
+def log_extra_section(title: str, lines: list[str] | None = None) -> None:
+    """Log a titled block of supplemental hints, distinct from remote command output (→).
+
+    :param title: One-line summary shown to the user
+    :param lines: Optional detail lines (e.g. nameserver hostnames)
+    """
+    logger.info(extra_line_for_log(title))
+    for raw in lines or []:
+        item = raw.strip()
+        if item:
+            logger.info(extra_line_for_log(f"  {item}"))
+
+
+def log_remote_output(text: str, *, level: int = logging.INFO) -> None:
+    """Log each line of remote (or captured SSH) output with the standard prefix.
+
+    Empty or whitespace-only lines are skipped.
+
+    :param text: Multiline stdout/stderr from a remote command
+    :param level: logging level (default INFO; use ERROR for failure excerpts)
+    """
+    for line in (text or "").splitlines():
+        if line.strip():
+            logger.log(level, remote_line_for_log(line))
+
+
+def format_remote_output_for_message(text: str) -> str:
+    """Prefix each line for multi-line error messages or logs.
+
+    :param text: Raw remote stdout or stderr
+    :return: Text with ``REMOTE_OUTPUT_LOG_PREFIX`` on each line
+    """
+    if not (text or "").strip():
+        return ""
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        out_lines.append(remote_line_for_log(line) if line.strip() else line)
+    return "\n".join(out_lines).rstrip()
 
 
 class LogStream:
@@ -40,11 +96,11 @@ class LogStream:
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             if line.strip():
-                logger.info(f"→ {line}")
+                logger.info(remote_line_for_log(line))
 
     def flush(self) -> None:
         if self._buf.strip():
-            logger.info(f"→ {self._buf}")
+            logger.info(remote_line_for_log(self._buf))
             self._buf = ""
 
 

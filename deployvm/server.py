@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from textwrap import dedent
+from textwrap import dedent, indent
 from typing import Literal
 
 import dns.resolver
@@ -18,7 +18,15 @@ from fabric import Connection
 from rich import print
 
 from .providers import check_aws_auth, get_provider
-from .utils import LogStream, error, log, warn
+from .utils import (
+    LogStream,
+    error,
+    format_remote_output_for_message,
+    log,
+    log_remote_output,
+    remote_line_for_log,
+    warn,
+)
 
 ProviderName = Literal["digitalocean", "aws", "vultr"]
 
@@ -27,6 +35,58 @@ HTTP_VERIFY_RETRIES = 6
 HTTP_VERIFY_DELAY = 5
 DNS_VERIFY_RETRIES = 30
 DNS_VERIFY_DELAY = 10
+
+_ENSURE_SITES_ENABLED_SCRIPT = dedent(r"""
+    set -e
+    if grep -q 'sites-enabled' /etc/nginx/nginx.conf 2>/dev/null; then
+        exit 0
+    fi
+    if grep -qE 'include[[:space:]]+.*/etc/nginx/conf\.d/\*\.conf' /etc/nginx/nginx.conf; then
+        sudo sed -i '/include[[:space:]]\+.*\/etc\/nginx\/conf\.d\/\*.conf;/a\    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
+    else
+        echo "deployvm: no conf.d include in /etc/nginx/nginx.conf; add include /etc/nginx/sites-enabled/*; inside http { }" >&2
+        exit 1
+    fi
+    sudo nginx -t
+""").strip()
+
+
+def ensure_nginx_sites_enabled_included(ip: str, ssh_user: str = "deploy") -> None:
+    """Ensure main nginx.conf loads sites-enabled (Ubuntu default; omitted by some upstream packages)."""
+    ssh_script(ip, _ENSURE_SITES_ENABLED_SCRIPT, user=ssh_user)
+
+
+def _parse_nginx_version(text: str) -> tuple[int, int, int] | None:
+    m = re.search(r"nginx/(\d+)\.(\d+)(?:\.(\d+))?", text)
+    if not m:
+        return None
+    patch = int(m.group(3) or 0)
+    return int(m.group(1)), int(m.group(2)), patch
+
+
+def _nginx_newer_than_1_22_line(v: tuple[int, int, int]) -> bool:
+    major, minor, _ = v
+    if major > 1:
+        return True
+    if major < 1:
+        return False
+    return minor > 22
+
+
+def install_nginx(ip: str, ssh_user: str = "deploy") -> None:
+    """Install nginx from apt and ensure it is newer than the entire 1.22.x line (e.g. 1.23+)."""
+    ssh_script(
+        ip,
+        "sudo apt-get update && sudo apt-get install -y nginx",
+        user=ssh_user,
+    )
+    ver_line = ssh(ip, "nginx -v 2>&1", user=ssh_user).strip()
+    parsed = _parse_nginx_version(ver_line)
+    if parsed is None or not _nginx_newer_than_1_22_line(parsed):
+        error(
+            f"nginx must be newer than 1.22.* (parsed from: {ver_line!r}). "
+            "Use a newer OS image or install a current nginx package (e.g. from nginx.org or your distro backports)."
+        )
 
 
 def check_instance_auth(instance: dict) -> None:
@@ -58,6 +118,36 @@ def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 1
         return False
 
 
+def _format_ssh_command_failure(result, remote_cmd: str) -> str:
+    """Build a log-friendly message for a failed remote command.
+
+    apt/dpkg and many scripts write errors to stdout; stderr may be empty.
+
+    :param result: Fabric/Invoke ``Result`` from ``Connection.run(..., warn=True)``
+    :param remote_cmd: Command string (truncated in the message if very long)
+    :return: Multi-line description for logs and ``RuntimeError``
+    """
+    parts: list[str] = []
+    snippet = remote_cmd if len(remote_cmd) <= 400 else remote_cmd[:400] + "..."
+    parts.append(f"command: {snippet}")
+    exited = getattr(result, "exited", None)
+    if exited is not None:
+        parts.append(f"exit code: {exited}")
+    stdout = (getattr(result, "stdout", None) or "").rstrip()
+    stderr = (getattr(result, "stderr", None) or "").rstrip()
+    if stderr:
+        parts.append("--- stderr ---")
+        parts.append(format_remote_output_for_message(stderr))
+    if stdout:
+        parts.append("--- stdout ---")
+        parts.append(format_remote_output_for_message(stdout))
+    if not stderr and not stdout:
+        parts.append(
+            "(no stdout/stderr from remote; check shell, sudo, or connection)"
+        )
+    return "\n".join(parts)
+
+
 def _run_ssh(ip: str, cmd: str, user: str, show_output: bool) -> str:
     """Single SSH attempt - open connection, run cmd, return stdout."""
     with Connection(ip, user=user, connect_kwargs={"look_for_keys": True}) as c:
@@ -69,7 +159,7 @@ def _run_ssh(ip: str, cmd: str, user: str, show_output: bool) -> str:
         else:
             result = c.run(cmd, hide=True, warn=True, in_stream=False)
         if result.failed:
-            raise RuntimeError(result.stderr)
+            raise RuntimeError(_format_ssh_command_failure(result, cmd))
         return result.stdout
 
 
@@ -81,7 +171,7 @@ def _retry_ssh(ip: str, cmd: str, user: str, show_output: bool, fail_msg: str) -
         try:
             return _run_ssh(ip, cmd, user, show_output)
         except RuntimeError as e:
-            error(fail_msg + str(e))
+            error(f"{fail_msg.rstrip()}\n{str(e)}")
         except ParamikoSSH as e:
             if "Error reading SSH protocol banner" in str(e) and attempt < 2:
                 time.sleep(5)
@@ -647,7 +737,7 @@ def setup_server(
         sudo apt-get install -y curl wget git ufw
         echo "Done!"
     """).strip()
-    print(ssh_script(ip, script, user=ssh_user))
+    log_remote_output(ssh_script(ip, script, user=ssh_user))
 
     setup_firewall(ip, ssh_user=ssh_user)
     setup_swap(ip, swap_size=swap_size, ssh_user=ssh_user)
@@ -687,6 +777,81 @@ def _ufw_tcp_port_state(status: str, port: int) -> tuple[bool, bool]:
         if "DENY" in u or "REJECT" in u:
             has_deny = True
     return has_allow, has_deny
+
+
+def _ufw_status_is_inactive(status: str) -> bool:
+    for line in status.splitlines()[:5]:
+        if "status:" in line.lower() and "inactive" in line.lower():
+            return True
+    return False
+
+
+def _verify_instance_ufw(
+    ufw_status: str,
+    *,
+    domain: str | None,
+    expect_ssl_only_firewall: bool,
+) -> tuple[list[str], bool]:
+    """Interpret UFW for ``verify_instance``.
+
+    :return: (issues, http_to_ip_likely_blocked). The second flag is True when 443 is allowed
+        but 80 is not, so ``http://<ip>`` may fail even though the deployment is healthy.
+    """
+    issues: list[str] = []
+
+    if _ufw_status_is_inactive(ufw_status):
+        print("[WARN] Firewall: UFW is inactive (rules are not enforced)")
+        return issues, False
+
+    a80, d80 = _ufw_tcp_port_state(ufw_status, 80)
+    a443, d443 = _ufw_tcp_port_state(ufw_status, 443)
+
+    if d443 and not a443:
+        issues.append("UFW: 443/tcp is denied/rejected without an allow rule")
+
+    if domain is not None and not a443:
+        issues.append("UFW: no allow rule for 443/tcp (required when verifying with --domain)")
+
+    relaxed_80 = expect_ssl_only_firewall or domain is not None
+
+    if not relaxed_80:
+        if d80 and not a80:
+            issues.append(
+                "UFW: port 80 is denied/rejected without an allow rule "
+                "(HTTP to the instance IP will fail)"
+            )
+        elif not a80 and not d80:
+            issues.append(
+                "UFW: no allow rule for port 80 (HTTP to the instance IP may be blocked by default deny)"
+            )
+
+    if a80 and d80:
+        print("[WARN] Firewall: port 80 has both ALLOW and DENY/REJECT — confirm UFW rule order")
+
+    http_to_ip_likely_blocked = bool(a443 and not a80)
+
+    if not issues:
+        if a443 and a80:
+            print("[OK] Firewall: HTTP (80) and HTTPS (443) allowed in UFW")
+        elif a443 and not a80 and relaxed_80:
+            if d80:
+                print("[OK] Firewall: HTTPS (443) allowed; HTTP (80) denied (SSL-only lockdown)")
+            else:
+                print(
+                    "[OK] Firewall: HTTPS (443) allowed; no allow rule for HTTP (80) "
+                    "(SSL-only or implicit deny — fine with --domain or --expect-ssl-only-firewall)"
+                )
+        elif a80 and not a443:
+            print("[OK] Firewall: HTTP (80) allowed (no 443 allow — typical for IP-only HTTP)")
+        elif not a80 and not a443:
+            print("[WARN] Firewall: no explicit UFW allow rules for 80 or 443")
+        else:
+            print("[OK] Firewall: UFW allows the ports needed for this verify run")
+
+    if issues:
+        log_remote_output(ufw_status)
+
+    return issues, http_to_ip_likely_blocked
 
 
 def _ufw_delete_port_blocks(port: int) -> str:
@@ -852,11 +1017,14 @@ def generate_nginx_server_block(
     static_dir: str | None = None,
     listen: str = "80",
     ssl_only: bool = False,
+    letsencrypt_cert_name: str | None = None,
 ) -> str:
     """Generate nginx server block.
 
     :param static_dir: If provided, nginx serves static files and proxies non-static requests
     :param ssl_only: If True, only listen on HTTPS (443) and block HTTP entirely
+    :param letsencrypt_cert_name: Primary name under /etc/letsencrypt/live/ for TLS directives
+        on the HTTPS server (required when ssl_only and listen includes ssl)
     """
     proxy_block = (
         dedent("""
@@ -893,22 +1061,35 @@ def generate_nginx_server_block(
         """).strip()
 
     if ssl_only:
-        # SSL-only mode: block HTTP entirely, only serve HTTPS
-        return dedent(f"""
+        tls_opts = ""
+        if letsencrypt_cert_name and "ssl" in listen:
+            core = dedent(f"""
+                ssl_certificate /etc/letsencrypt/live/{letsencrypt_cert_name}/fullchain.pem;
+                ssl_certificate_key /etc/letsencrypt/live/{letsencrypt_cert_name}/privkey.pem;
+                include /etc/letsencrypt/options-ssl-nginx.conf;
+            """).strip()
+            tls_opts = indent(core, "                ") + "\n"
+        out = dedent(f"""
             # Block HTTP entirely when SSL-only mode is enabled
             server {{
                 listen 80;
                 server_name {server_name};
                 return 444;  # Drop connection without response
             }}
-            
+
             server {{
                 listen {listen};
                 server_name {server_name};
+                __DEPLOYVM_TLS__
 
                 {location_block}
             }}
         """).strip()
+        if tls_opts:
+            out = out.replace("                __DEPLOYVM_TLS__\n", tls_opts)
+        else:
+            out = out.replace("                __DEPLOYVM_TLS__\n", "")
+        return out
     else:
         return dedent(f"""
             server {{
@@ -945,9 +1126,8 @@ def setup_nginx_ip(
     )
 
     log(f"Setting up nginx for IP access on '{ip}' port {outgoing_port} (app: {app_name})...")
-    ssh_script(
-        ip, "sudo apt-get update && sudo apt-get install -y nginx", user=ssh_user
-    )
+    install_nginx(ip, ssh_user)
+    ensure_nginx_sites_enabled_included(ip, ssh_user)
     ssh_write_file(
         ip, f"/etc/nginx/sites-available/{app_name}", server_block, user=ssh_user
     )
@@ -988,31 +1168,38 @@ def setup_nginx_ssl(
         is configured to also listen on that port after the certificate is issued.
     :param provider: Cloud provider instance for updating cloud-level firewall rules
     """
-    # SSL-only mode requires special handling for certificate provisioning
+    defer_ssl_lockdown = False
     if ssl_only:
-        # Check if SSL certificate already exists
         cert_check_cmd = f"test -d /etc/letsencrypt/live/{domain} && echo 'EXISTS' || echo 'MISSING'"
         cert_exists = ssh(ip, cert_check_cmd, user=ssh_user).strip()
-        
+
         if cert_exists == 'MISSING':
             log("🔒 SSL lockdown requested but certificate missing. Using automatic two-phase deployment:")
             log("📋 Phase 1: Setting up SSL certificate with temporary HTTP access...")
-            
-            # Phase 1: Setup SSL certificate with HTTP access
+
             ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=False)
             _setup_ssl_certificate_phase(ip, domain, email, port, outgoing_port, static_dir, skip_dns, staging, ssh_user, provider_name, aws_profile)
-            
+
             log("🔒 Phase 2: Applying SSL lockdown (blocking HTTP access)...")
-            # Phase 2: Apply SSL lockdown
             ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=True)
             _apply_ssl_lockdown_phase(ip, domain, port, static_dir, outgoing_port, ssh_user)
-            
+
             log("✅ SSL lockdown deployment complete! HTTPS-only access enabled.")
             return
-        else:
-            log("✅ SSL certificate exists. Applying SSL lockdown directly...")
-    
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=ssl_only)
+
+        log(
+            "🔒 SSL lockdown requested; certificate already on disk. "
+            "Keeping HTTP open until certbot finishes, then applying firewall and nginx lockdown."
+        )
+        defer_ssl_lockdown = True
+
+    ensure_web_firewall(
+        ip,
+        ssh_user=ssh_user,
+        extra_port=outgoing_port,
+        provider=provider,
+        ssl_only=False if defer_ssl_lockdown else ssl_only,
+    )
     if not skip_dns:
         ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
 
@@ -1023,15 +1210,19 @@ def setup_nginx_ssl(
         user=ssh_user,
     )
 
+    nginx_ssl_only = False if defer_ssl_lockdown else ssl_only
     server_block = generate_nginx_server_block(
-        f"{domain} www.{domain}", port, static_dir, ssl_only=ssl_only
+        f"{domain} www.{domain}",
+        port,
+        static_dir,
+        ssl_only=nginx_ssl_only,
+        letsencrypt_cert_name=None,
     )
 
     profile_info = f" (profile: {aws_profile})" if aws_profile else ""
     log(f"Setting up nginx for '{domain}' via {provider_name}{profile_info}...")
-    ssh_script(
-        ip, "sudo apt-get update && sudo apt-get install -y nginx", user=ssh_user
-    )
+    install_nginx(ip, ssh_user)
+    ensure_nginx_sites_enabled_included(ip, ssh_user)
     ssh_write_file(
         ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user
     )
@@ -1055,7 +1246,7 @@ def setup_nginx_ssl(
     else:
         error("DNS verification timeout")
 
-    if not ssl_only:
+    if not ssl_only or defer_ssl_lockdown:
         verify_http(ip, domain=domain)
 
     log("Obtaining SSL certificate...")
@@ -1076,6 +1267,13 @@ def setup_nginx_ssl(
         sudo systemctl enable --now certbot.timer
     """).strip()
     ssh_script(ip, ssl_script, user=ssh_user)
+
+    if defer_ssl_lockdown:
+        ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=True)
+        _apply_ssl_lockdown_phase(ip, domain, port, static_dir, outgoing_port, ssh_user)
+        port_suffix = f":{outgoing_port}" if outgoing_port != 443 else ""
+        log(f"SSL configured! http://{ip} and https://{domain}{port_suffix}")
+        return
 
     # Certbot always configures 443. If a custom port is requested, add an
     # additional listen directive to the SSL server block.
@@ -1218,12 +1416,14 @@ def verify_instance(
     *,
     domain: str | None = None,
     ssh_user: str = "deploy",
+    expect_ssl_only_firewall: bool = False,
 ):
     """Verify instance health: SSH, firewall, DNS, nginx, app.
 
     :param name: Instance name
     :param domain: Domain to check DNS for
     :param ssh_user: SSH user for connection
+    :param expect_ssl_only_firewall: If True, do not require UFW to allow port 80 (HTTPS-only setups)
     """
     data = load_instance(name)
     ip = data["ip"]
@@ -1235,25 +1435,22 @@ def verify_instance(
     # SSH check
     try:
         uptime = ssh(ip, "uptime", user=ssh_user).strip()
-        print(f"[OK] SSH: '{uptime}'")
+        print(f"[OK] SSH: {remote_line_for_log(uptime)}")
     except Exception as e:
         print(f"[FAIL] SSH: {e}")
         issues.append("SSH connection failed")
         return
 
     ufw_status = ssh(ip, "sudo ufw status", user=ssh_user)
-    has_80 = "80/tcp" in ufw_status
-    has_443 = "443/tcp" in ufw_status
-    if has_80 and has_443:
-        print("[OK] Firewall: ports 80, 443 open")
-    else:
-        missing = []
-        if not has_80:
-            missing.append("80")
-        if not has_443:
-            missing.append("443")
-        print(f"[FAIL] Firewall: ports {', '.join(missing)} not open")
-        issues.append(f"Firewall missing ports: {', '.join(missing)}")
+    fw_issues, http_ip_firewall_ssl = _verify_instance_ufw(
+        ufw_status,
+        domain=domain,
+        expect_ssl_only_firewall=expect_ssl_only_firewall,
+    )
+    issues.extend(fw_issues)
+    relax_http_ip = http_ip_firewall_ssl and (
+        domain is not None or expect_ssl_only_firewall
+    )
 
     nginx_status = ssh(
         ip, "systemctl is-active nginx 2>/dev/null || echo 'inactive'", user=ssh_user
@@ -1278,6 +1475,14 @@ def verify_instance(
     status_code, response_line = check_http_status(f"http://{ip}")
     if status_code and status_code in [200, 301, 302]:
         print("[OK] HTTP: responding")
+    elif relax_http_ip:
+        if status_code:
+            print(f"[WARN] HTTP: instance IP returned '{response_line}' (HTTPS-only / blocked 80 is common)")
+        else:
+            print(
+                "[WARN] HTTP: no response on instance IP (expected when only 443 is open or "
+                "UFW denies port 80)"
+            )
     elif status_code:
         print(f"[WARN] HTTP: '{response_line}'")
     else:
@@ -1337,9 +1542,8 @@ def _setup_ssl_certificate_phase(
     )
 
     log(f"Setting up nginx for '{domain}' (certificate provisioning phase)...")
-    ssh_script(
-        ip, "sudo apt-get update && sudo apt-get install -y nginx", user=ssh_user
-    )
+    install_nginx(ip, ssh_user)
+    ensure_nginx_sites_enabled_included(ip, ssh_user)
     ssh_write_file(
         ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user
     )
@@ -1414,7 +1618,12 @@ def _apply_ssl_lockdown_phase(
     
     # Generate SSL-only server block (with HTTP blocking)
     server_block = generate_nginx_server_block(
-        f"{domain} www.{domain}", port, static_dir, ssl_only=True, listen="443 ssl"
+        f"{domain} www.{domain}",
+        port,
+        static_dir,
+        ssl_only=True,
+        listen="443 ssl",
+        letsencrypt_cert_name=domain,
     )
     
     # Write the new SSL-only configuration

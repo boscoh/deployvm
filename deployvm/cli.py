@@ -17,7 +17,12 @@ from pathlib import Path
 import cyclopts
 from rich import print
 
-from .utils import UVICORN_LOG_CONFIG, setup_logging
+from .utils import (
+    UVICORN_LOG_CONFIG,
+    log_extra_section,
+    log_remote_output,
+    setup_logging,
+)
 
 setup_logging()
 
@@ -246,14 +251,21 @@ def verify_command(
     *,
     domain: str | None = None,
     ssh_user: str = "deploy",
+    expect_ssl_only_firewall: bool = False,
 ):
     """Verify instance health: SSH, firewall, DNS, nginx, app.
 
     :param name: Instance name
     :param domain: Domain to check DNS for
     :param ssh_user: SSH user for connection
+    :param expect_ssl_only_firewall: Allow UFW to block port 80 without failing verify (no --domain)
     """
-    verify_instance(name, domain=domain, ssh_user=ssh_user)
+    verify_instance(
+        name,
+        domain=domain,
+        ssh_user=ssh_user,
+        expect_ssl_only_firewall=expect_ssl_only_firewall,
+    )
 
 
 def _ensure_ssh_reachable(ip: str, ssh_user: str, instance: dict) -> None:
@@ -357,13 +369,14 @@ def nginx_ssl_command(
     p = get_provider(provider_name, aws_profile=aws_profile)
 
     if not skip_dns:
-        # Create DNS zone + A records, then print nameservers as a reminder
+        # Create DNS zone + A records, then log nameservers (extra |) for the registrar
         log(f"Setting up DNS zone for '{domain}' -> '{ip}'...")
         p.setup_dns(domain, ip)
         nameservers = p.get_nameservers(domain)
-        log(f"Nameservers for '{domain}' (set these at your registrar if not already done):")
-        for ns in nameservers:
-            print(f"  {ns}")
+        log_extra_section(
+            f"Nameservers for '{domain}' (set these at your registrar if not already done)",
+            nameservers,
+        )
 
     setup_nginx_ssl(
         ip,
@@ -482,7 +495,7 @@ def show_pm2_status(target: str, *, user: str | None = None):
     provider = instance.get("provider", "digitalocean")
 
     npm_inst = NpmApp(instance, provider, user=user)
-    print(npm_inst.status())
+    log_remote_output(npm_inst.status())
 
 
 @npm_app.command(name="logs")
@@ -510,7 +523,7 @@ def show_pm2_logs(
     app_name = resolve_app_name(apps, "app", app_name, fallback)
 
     npm_inst = NpmApp(instance, provider, user=user, app_name=app_name)
-    print(npm_inst.logs(lines))
+    log_remote_output(npm_inst.logs(lines))
 
 
 @npm_app.command(name="deploy")
@@ -749,7 +762,7 @@ def show_supervisor_status(target: str):
 
     user = instance.get("user", "deploy")
     uv_inst = UVApp(instance, provider, user=user)
-    print(uv_inst.status())
+    log_remote_output(uv_inst.status())
 
 
 @uv_app.command(name="logs")
@@ -775,7 +788,7 @@ def show_supervisor_logs(
 
     user = instance.get("user", "deploy")
     uv_inst = UVApp(instance, provider, user=user, app_name=app_name)
-    print(uv_inst.logs(lines))
+    log_remote_output(uv_inst.logs(lines))
 
 
 @uv_app.command(name="deploy")
@@ -960,6 +973,10 @@ def get_nameservers(
     p = get_provider(provider)
     nameservers = p.get_nameservers(domain)
     print(json.dumps(nameservers))
+    log_extra_section(
+        f"Registrar nameservers for '{domain}' (same values as JSON on stdout)",
+        nameservers,
+    )
 
 
 @app.command(name="probe", sort_key=6)
