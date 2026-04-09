@@ -63,8 +63,10 @@ class Provider(Protocol):
     def cleanup_resources(self, *, dry_run: bool = True) -> None: ...
 
     def open_firewall_port(self, port: int) -> None: ...
-    
+
     def block_firewall_port(self, port: int) -> None: ...
+
+    def ensure_standard_web_ports_open(self) -> None: ...
 
 
 def _get_my_ip() -> str | None:
@@ -329,9 +331,12 @@ class DigitalOceanProvider:
 
     def open_firewall_port(self, port: int) -> None:
         pass  # DigitalOcean uses UFW only, no cloud-level firewall
-    
+
     def block_firewall_port(self, port: int) -> None:
         pass  # DigitalOcean uses UFW only, no cloud-level firewall
+
+    def ensure_standard_web_ports_open(self) -> None:
+        pass
 
 
 class AWSProvider:
@@ -1328,7 +1333,12 @@ class AWSProvider:
             }],
         )
         log(f"Opened port {port} in AWS security group")
-    
+
+    def ensure_standard_web_ports_open(self) -> None:
+        """Ensure HTTP and HTTPS ingress on deploy-vm-web (idempotent)."""
+        self.open_firewall_port(80)
+        self.open_firewall_port(443)
+
     def block_firewall_port(self, port: int) -> None:
         """Block a TCP port in the AWS deploy-vm-web security group.
         
@@ -1768,7 +1778,11 @@ class VultrProvider:
             "--size", "0",
         )
         log(f"Opened port {port} in Vultr firewall group")
-    
+
+    def ensure_standard_web_ports_open(self) -> None:
+        self.open_firewall_port(80)
+        self.open_firewall_port(443)
+
     def block_firewall_port(self, port: int) -> None:
         """Block a TCP port in the Vultr deploy-vm-web firewall group.
         

@@ -657,6 +657,47 @@ def setup_server(
     log("Server setup complete")
 
 
+def _ufw_line_matches_tcp_port(line: str, port: int) -> bool:
+    """True if this status line is for ``port``/tcp (not e.g. 8000 when port is 80)."""
+    key = f"{port}/tcp"
+    for tok in line.split():
+        if tok == key or tok.startswith(f"{key}("):
+            return True
+    return False
+
+
+def _ufw_tcp_port_state(status: str, port: int) -> tuple[bool, bool]:
+    """Parse ``ufw status`` for a TCP port.
+
+    Works for default and numbered ``ufw status`` output.
+    REJECT rules are treated like DENY for allow/deny logic.
+
+    :param status: Raw output of ``sudo ufw status``
+    :param port: TCP port (e.g. 80, 443)
+    :return: (has_allow_rule, has_deny_or_reject_rule) for that port's tcp rules
+    """
+    has_allow = False
+    has_deny = False
+    for line in status.splitlines():
+        if not _ufw_line_matches_tcp_port(line, port):
+            continue
+        u = line.upper()
+        if "ALLOW" in u:
+            has_allow = True
+        if "DENY" in u or "REJECT" in u:
+            has_deny = True
+    return has_allow, has_deny
+
+
+def _ufw_delete_port_blocks(port: int) -> str:
+    """:return: shell snippet to drop deny/reject rules for ``port``/tcp (best-effort)."""
+    p = int(port)
+    return (
+        f"sudo ufw delete deny {p}/tcp 2>/dev/null || true && "
+        f"sudo ufw delete reject {p}/tcp 2>/dev/null || true"
+    )
+
+
 def ensure_web_firewall(
     ip: str,
     ssh_user: str = "deploy",
@@ -669,57 +710,88 @@ def ensure_web_firewall(
     Updates both the OS-level UFW firewall and, when a provider is given,
     the cloud-level firewall (AWS security group, Vultr firewall group).
 
+    Does not assume 80/443 are already allowed: clears conflicting UFW DENY rules,
+    ensures cloud ingress for 80 and 443 when not in ssl-only mode, and before
+    ssl-only lockdown opens 443 at the cloud then revokes 80.
+
     :param extra_port: Additional TCP port to open (e.g. custom outgoing_port)
     :param provider: Cloud provider instance for updating cloud-level firewall rules
     :param ssl_only: If True, block port 80 at firewall level for enhanced security
     """
     log("Checking firewall...")
     result = ssh(ip, "sudo ufw status", user=ssh_user)
-    
+
     if ssl_only:
-        # SSL-only mode: block port 80, only allow 443
-        needs_block_80 = "80/tcp" in result and "ALLOW" in result
-        needs_443 = "443/tcp" not in result
+        a80, d80 = _ufw_tcp_port_state(result, 80)
+        a443, d443 = _ufw_tcp_port_state(result, 443)
+        a_extra, d_extra = (
+            _ufw_tcp_port_state(result, extra_port)
+            if extra_port is not None and extra_port not in (80, 443)
+            else (False, False)
+        )
+
+        needs_80_lock = a80 or not d80
+        needs_443 = d443 or not a443
         needs_extra = (
             extra_port is not None
             and extra_port not in (80, 443)
-            and f"{extra_port}/tcp" not in result
+            and (d_extra or not a_extra)
         )
-        
-        if needs_block_80 or needs_443 or needs_extra:
+
+        if needs_80_lock or needs_443 or needs_extra:
             log("Configuring SSL-only firewall (blocking HTTP port 80)...")
             cmds = []
-            if needs_block_80:
+            if a80:
                 cmds.append("sudo ufw delete allow 80/tcp")
+            if needs_80_lock:
                 cmds.append("sudo ufw deny 80/tcp")
-            if needs_443:
+            if d443:
+                cmds.append(_ufw_delete_port_blocks(443))
+            if not a443 or d443:
                 cmds.append("sudo ufw allow 443/tcp")
-            if needs_extra:
-                cmds.append(f"sudo ufw allow {extra_port}/tcp")
+            if extra_port is not None and extra_port not in (80, 443):
+                if d_extra:
+                    cmds.append(_ufw_delete_port_blocks(extra_port))
+                if not a_extra or d_extra:
+                    cmds.append(f"sudo ufw allow {extra_port}/tcp")
             cmds.append("sudo ufw reload")
             ssh_script(ip, " && ".join(cmds), user=ssh_user)
             log("SSL-only firewall configured")
         else:
             log("SSL-only firewall OK")
     else:
-        # Normal mode: allow both 80 and 443
-        needs_80 = "80/tcp" not in result
-        needs_443 = "443/tcp" not in result
+        a80, d80 = _ufw_tcp_port_state(result, 80)
+        a443, d443 = _ufw_tcp_port_state(result, 443)
+        a_extra, d_extra = (
+            _ufw_tcp_port_state(result, extra_port)
+            if extra_port is not None and extra_port not in (80, 443)
+            else (False, False)
+        )
+
+        needs_80 = d80 or not a80
+        needs_443 = d443 or not a443
         needs_extra = (
             extra_port is not None
             and extra_port not in (80, 443)
-            and f"{extra_port}/tcp" not in result
+            and (d_extra or not a_extra)
         )
 
         if needs_80 or needs_443 or needs_extra:
             log("Opening web ports in firewall...")
             cmds = []
+            if d80:
+                cmds.append(_ufw_delete_port_blocks(80))
             if needs_80:
                 cmds.append("sudo ufw allow 80/tcp")
+            if d443:
+                cmds.append(_ufw_delete_port_blocks(443))
             if needs_443:
                 cmds.append("sudo ufw allow 443/tcp")
-            if needs_extra:
-                cmds.append(f"sudo ufw allow {extra_port}/tcp")
+            if extra_port is not None and extra_port not in (80, 443):
+                if d_extra:
+                    cmds.append(_ufw_delete_port_blocks(extra_port))
+                if not a_extra or d_extra:
+                    cmds.append(f"sudo ufw allow {extra_port}/tcp")
             cmds.append("sudo ufw reload")
             ssh_script(ip, " && ".join(cmds), user=ssh_user)
             log("Firewall updated")
@@ -727,10 +799,13 @@ def ensure_web_firewall(
             log("Firewall OK")
 
     if provider is not None:
+        if ssl_only:
+            provider.open_firewall_port(443)
+            provider.block_firewall_port(80)
+        else:
+            provider.ensure_standard_web_ports_open()
         if extra_port is not None and extra_port not in (80, 443):
             provider.open_firewall_port(extra_port)
-        if ssl_only:
-            provider.block_firewall_port(80)
 
 
 def ensure_dns_matches(
