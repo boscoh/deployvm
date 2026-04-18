@@ -25,8 +25,7 @@ def _get_available_providers() -> list[str]:
     available = []
     for name in ALL_PROVIDERS:
         try:
-            p = get_provider(name)
-            p.validate_auth()
+            get_provider(name)
             available.append(name)
         except (SystemExit, Exception):
             pass
@@ -60,7 +59,6 @@ def live_instance(provider_name):
     for attempt in range(1, MAX_INSTANCE_RETRIES + 1):
         name = f"test-deployvm-{uuid4().hex[:8]}"
         p = get_provider(provider_name)
-        p.validate_auth()
 
         print(f"\n[INFO] Creating instance (attempt {attempt}/{MAX_INSTANCE_RETRIES})...")
         result = p.create_instance(name, p.region, p.vm_size)
@@ -120,7 +118,6 @@ def npm_live_instance(provider_name):
     for attempt in range(1, MAX_INSTANCE_RETRIES + 1):
         name = f"test-npm-{uuid4().hex[:8]}"
         p = get_provider(provider_name)
-        p.validate_auth()
 
         print(f"\n[INFO] Creating npm instance (attempt {attempt}/{MAX_INSTANCE_RETRIES})...")
         result = p.create_instance(name, p.region, p.vm_size)

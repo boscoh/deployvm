@@ -96,8 +96,7 @@ def check_instance_auth(instance: dict) -> None:
     """
     provider = instance.get("provider")
     aws_profile = instance.get("aws_profile")
-    p = get_provider(provider, aws_profile=aws_profile)
-    p.validate_auth()
+    get_provider(provider, aws_profile=aws_profile)
 
 
 def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 10) -> bool:

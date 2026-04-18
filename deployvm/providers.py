@@ -11,7 +11,17 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    CredentialRetrievalError,
+    LoginTokenLoadError,
+    NoCredentialsError,
+    PartialCredentialsError,
+    SSOTokenLoadError,
+    TokenRetrievalError,
+    UnauthorizedSSOTokenError,
+)
 from dotenv import load_dotenv
 
 from .utils import error, log, run_cmd, run_cmd_json, warn
@@ -140,7 +150,7 @@ class DigitalOceanProvider:
             ["doctl", "auth", "validate"], capture_output=True, text=True
         )
         if result.returncode != 0:
-            error("doctl not authenticated. Run: doctl auth init")
+            error("Not signed in to DigitalOcean. Run: doctl auth init")
 
     def instance_exists(self, name: str) -> bool:
         """Check if a droplet with the given name exists.
@@ -178,8 +188,6 @@ class DigitalOceanProvider:
         :return: Dictionary with 'id' and 'ip' keys for the created droplet
         :raises SystemExit: If droplet already exists or creation fails
         """
-        self.validate_auth()
-
         if self.instance_exists(name):
             error(f"Droplet '{name}' already exists")
 
@@ -250,7 +258,6 @@ class DigitalOceanProvider:
         :param instance_id: The droplet ID to delete
         :raises SystemExit: If authentication fails or deletion fails
         """
-        self.validate_auth()
         run_cmd("doctl", "compute", "droplet", "delete", str(instance_id), "--force")
 
     def list_instances(self) -> list[dict]:
@@ -259,7 +266,6 @@ class DigitalOceanProvider:
         :return: List of dictionaries with 'name', 'ip', 'status', and 'region' keys
         :raises SystemExit: If authentication fails
         """
-        self.validate_auth()
         droplets = run_cmd_json("doctl", "compute", "droplet", "list")
         return [
             {
@@ -279,7 +285,6 @@ class DigitalOceanProvider:
         ]
 
     def setup_dns(self, domain: str, ip: str) -> None:
-        self.validate_auth()
         domains = run_cmd_json("doctl", "compute", "domain", "list")
         domain_exists = any(d["name"] == domain for d in domains)
 
@@ -430,6 +435,8 @@ class AWSProvider:
                 f"See PROVIDER_COMPARISON.md for full list."
             )
 
+        self._auth_detail = ""
+
     @staticmethod
     def get_aws_config(profile: str | None = None) -> dict:
         """Load AWS configuration for boto3 session initialization.
@@ -440,39 +447,48 @@ class AWSProvider:
         :param profile: Explicit AWS profile name (overrides AWS_PROFILE env var)
         :return: Dict with profile_name and/or region_name keys for boto3.Session()
         """
-        load_dotenv()
-
-        aws_config = {}
-        available_profiles = set()
-        credentials_path = os.path.expanduser("~/.aws/credentials")
-        config_path = os.path.expanduser("~/.aws/config")
-
         import configparser
-        for path in [credentials_path, config_path]:
-            if os.path.exists(path):
-                cfg = configparser.ConfigParser()
-                cfg.read(path)
-                for section in cfg.sections():
-                    if section.startswith("profile "):
-                        available_profiles.add(section[8:])
-                    else:
-                        available_profiles.add(section)
 
-        profile_name = profile or os.getenv("AWS_PROFILE")
-        if not profile_name and "default" in available_profiles:
-            profile_name = "default"
-        if profile_name:
-            if profile_name in available_profiles:
-                aws_config["profile_name"] = profile_name
-            else:
-                log(f"AWS profile '{profile_name}' not found, using default credential chain...")
-                os.environ.pop("AWS_PROFILE", None)
+        try:
+            load_dotenv()
 
-        region = os.getenv("AWS_REGION")
-        if region:
-            aws_config["region_name"] = region
+            aws_config = {}
+            available_profiles = set()
+            credentials_path = os.path.expanduser("~/.aws/credentials")
+            config_path = os.path.expanduser("~/.aws/config")
 
-        return aws_config
+            for path in [credentials_path, config_path]:
+                if os.path.exists(path):
+                    cfg = configparser.ConfigParser()
+                    cfg.read(path)
+                    for section in cfg.sections():
+                        if section.startswith("profile "):
+                            available_profiles.add(section[8:])
+                        else:
+                            available_profiles.add(section)
+
+            profile_name = profile or os.getenv("AWS_PROFILE")
+            if not profile_name and "default" in available_profiles:
+                profile_name = "default"
+            if profile_name:
+                if profile_name in available_profiles:
+                    aws_config["profile_name"] = profile_name
+                else:
+                    log(
+                        f"AWS profile '{profile_name}' not found, using default credential chain..."
+                    )
+                    os.environ.pop("AWS_PROFILE", None)
+
+            region = os.getenv("AWS_REGION")
+            if region:
+                aws_config["region_name"] = region
+
+            return aws_config
+        except (OSError, UnicodeDecodeError, configparser.Error) as e:
+            error(
+                f"Could not load AWS configuration ({type(e).__name__}). "
+                "Check ~/.aws/credentials and ~/.aws/config permissions and syntax."
+            )
 
     def validate_auth(self) -> None:
         check_aws_auth(self.aws_config.get("profile_name"))
@@ -487,7 +503,9 @@ class AWSProvider:
             account_name = aliases[0] if aliases else account_id
         except Exception:
             account_name = account_id
-        log(f"AWS: region={self.region}  profile={profile}  account={account_name}")
+        self._auth_detail = (
+            f"region={self.region!r}  profile={profile!r}  account={account_name!r}"
+        )
 
     def _get_ec2_client(self):
         return self._get_session().client("ec2")
@@ -1048,8 +1066,6 @@ class AWSProvider:
         iam_role: str | None = None,
         iam_profile: str | None = None,
     ) -> dict:
-        self.validate_auth()
-
         if self.instance_exists(name):
             error(f"EC2 instance '{name}' already exists")
 
@@ -1127,7 +1143,6 @@ class AWSProvider:
         return {"id": instance_id, "ip": ip, "os_image": ami_id}
 
     def delete_instance(self, instance_id: str) -> None:
-        self.validate_auth()
         ec2 = self._get_ec2_client()
         ec2.terminate_instances(InstanceIds=[instance_id])
         log("Waiting for instance to terminate...")
@@ -1135,7 +1150,6 @@ class AWSProvider:
         waiter.wait(InstanceIds=[instance_id])
 
     def list_instances(self) -> list[dict]:
-        self.validate_auth()
         ec2 = self._get_ec2_client()
         response = ec2.describe_instances(
             Filters=[
@@ -1176,7 +1190,6 @@ class AWSProvider:
         """
         import time
 
-        self.validate_auth()
         route53 = self._get_route53_client()
 
         response = route53.list_hosted_zones()
@@ -1198,7 +1211,6 @@ class AWSProvider:
         return zone_response["DelegationSet"]["NameServers"]
 
     def setup_dns(self, domain: str, ip: str) -> None:
-        self.validate_auth()
         route53 = self._get_route53_client()
 
         response = route53.list_hosted_zones()
@@ -1247,7 +1259,6 @@ class AWSProvider:
 
         :param dry_run: Show what would be deleted without deleting
         """
-        self.validate_auth()
         ec2 = self._get_ec2_client()
         region = self.aws_config.get("region_name", "ap-southeast-2")
 
@@ -1430,10 +1441,9 @@ class VultrProvider:
             ["vultr-cli", "account", "info"], capture_output=True, text=True
         )
         if result.returncode != 0:
-            if "Unauthorized" in result.stderr or "401" in result.stderr:
-                error(f"vultr-cli authentication failed. Check your VULTR_API_KEY.\n  {result.stderr.strip()}")
-            else:
-                error(f"vultr-cli not working. Is it installed and configured?\n  {result.stderr.strip()}")
+            error(
+                "Not signed in to Vultr. Install vultr-cli and set the VULTR_API_KEY environment variable."
+            )
 
     def instance_exists(self, name: str) -> bool:
         """Check if an instance with the given label exists.
@@ -1605,8 +1615,6 @@ class VultrProvider:
         :return: Dictionary with 'id' and 'ip' keys for the created instance
         :raises SystemExit: If instance already exists, creation fails, or timeout
         """
-        self.validate_auth()
-
         if self.instance_exists(name):
             error(f"Instance '{name}' already exists")
 
@@ -1653,7 +1661,6 @@ class VultrProvider:
         :param instance_id: The instance ID to delete
         :raises SystemExit: If deletion fails (404 treated as already deleted)
         """
-        self.validate_auth()
         result = subprocess.run(
             ["vultr-cli", "instance", "delete", str(instance_id)],
             capture_output=True, text=True,
@@ -1667,7 +1674,6 @@ class VultrProvider:
         :return: List of dictionaries with 'name', 'ip', 'status', and 'region' keys
         :raises SystemExit: If authentication fails
         """
-        self.validate_auth()
         result = run_cmd_json("vultr-cli", "instance", "list")
         instances = result.get("instances") or []
         return [
@@ -1721,8 +1727,6 @@ class VultrProvider:
 
         :param dry_run: Show what would be deleted without deleting
         """
-        self.validate_auth()
-
         result = run_cmd_json("vultr-cli", "firewall", "group", "list")
         groups = result.get("firewall_groups") or []
         managed = [
@@ -1819,6 +1823,8 @@ def check_aws_auth(profile: str | None = None) -> None:
     if profile:
         aws_config["profile_name"] = profile
 
+    sso_login = f"aws sso login --profile {profile}" if profile else "aws sso login"
+
     try:
         session = boto3.Session(**aws_config)
         sts = session.client("sts")
@@ -1826,12 +1832,36 @@ def check_aws_auth(profile: str | None = None) -> None:
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
         if error_code in ("ExpiredToken", "ExpiredTokenException"):
-            login_cmd = f"aws sso login --profile {profile}" if profile else "aws sso login"
-            error(f"AWS credentials expired. Run:\n  {login_cmd}")
+            error(f"Not signed in to AWS (credentials expired). Run: {sso_login}")
         else:
-            error(f"AWS authentication failed ({error_code}): {e}")
+            error(
+                "Not signed in to AWS. Run `aws configure` or `aws sso login`, "
+                f"or check AWS_ACCESS_KEY_ID / AWS_PROFILE. ({error_code})"
+            )
+    except UnauthorizedSSOTokenError:
+        error(f"AWS SSO session expired or invalid. Run: {sso_login}")
+    except SSOTokenLoadError:
+        error(f"Could not load AWS SSO token. Run: {sso_login}")
+    except LoginTokenLoadError:
+        error(f"Could not load AWS login token. Run: {sso_login}")
+    except TokenRetrievalError:
+        error(f"AWS could not refresh credentials. Run: {sso_login}")
+    except CredentialRetrievalError:
+        error(f"AWS could not obtain credentials (profile or SSO failed). Run: {sso_login}")
+    except NoCredentialsError:
+        error("No AWS credentials configured. Run `aws configure` or `aws sso login`.")
+    except PartialCredentialsError as e:
+        detail = str(e).strip().replace("\n", " ")
+        if len(detail) > 160:
+            detail = detail[:160] + "…"
+        error(f"AWS credentials are incomplete: {detail}")
+    except BotoCoreError as e:
+        error(f"AWS error ({type(e).__name__}). If you use SSO, run: {sso_login}")
     except Exception as e:
-        error(f"AWS authentication failed: {e}")
+        detail = str(e).strip().replace("\n", " ")
+        if len(detail) > 200:
+            detail = detail[:200] + "…"
+        error(f"Not signed in to AWS ({type(e).__name__}): {detail}")
 
 
 def get_provider(
@@ -1841,8 +1871,13 @@ def get_provider(
     os_image: str | None = None,
     vm_size: str | None = None,
     aws_profile: str | None = None,
+    validate: bool = True,
 ) -> Provider:
-    """Get a provider instance with defaults applied."""
+    """Get a provider instance with defaults applied.
+
+    When ``validate`` is True (default), checks that CLI/API credentials work and exits
+    with a short message if not.
+    """
     if provider is None:
         load_dotenv()
         provider = os.getenv("DEPLOY_VM_PROVIDER", "digitalocean")
@@ -1855,8 +1890,15 @@ def get_provider(
         error(f"Unknown provider: {provider}. Available: digitalocean, aws, vultr")
 
     if provider == "digitalocean":
-        return DigitalOceanProvider(os_image=os_image, region=region, vm_size=vm_size)
+        p: Provider = DigitalOceanProvider(os_image=os_image, region=region, vm_size=vm_size)
     elif provider == "vultr":
-        return VultrProvider(os_image=os_image, region=region, vm_size=vm_size)
-    else:  # aws
-        return AWSProvider(os_image=os_image, region=region, vm_size=vm_size, aws_profile=aws_profile)
+        p = VultrProvider(os_image=os_image, region=region, vm_size=vm_size)
+    else:
+        p = AWSProvider(os_image=os_image, region=region, vm_size=vm_size, aws_profile=aws_profile)
+    if validate:
+        p.validate_auth()
+        if isinstance(p, AWSProvider):
+            log(f"Authenticated (aws) — {p._auth_detail}")
+        else:
+            log(f"Authenticated ({p.provider_name})")
+    return p

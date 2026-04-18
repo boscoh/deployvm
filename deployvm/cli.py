@@ -15,7 +15,9 @@ Examples:
 from pathlib import Path
 
 import cyclopts
-from rich import print
+from rich import box, print
+from rich.padding import Padding
+from rich.table import Table
 
 from .utils import (
     UVICORN_LOG_CONFIG,
@@ -146,7 +148,6 @@ def delete_instance(
         p = get_provider(provider)
     else:
         log(f"No '{name}.instance.json' found, looking up from '{p.provider_name}'...")
-        p.validate_auth()
         lookup = p.get_instance_by_name(name)
         if not lookup:
             error(f"Instance '{name}' not found in '{p.provider_name}'")
@@ -177,15 +178,17 @@ def update_ssh_ip(name: str):
 
     :param name: Instance name
     """
-    from .providers import AWSProvider
-
     instance = load_instance(name)
     check_instance_auth(instance)
 
     if instance.get("provider") != "aws":
         error("update-ssh-ip is only supported for AWS instances")
 
-    p = AWSProvider(aws_profile=instance.get("aws_profile"), region=instance.get("region"))
+    p = get_provider(
+        "aws",
+        aws_profile=instance.get("aws_profile"),
+        region=instance.get("region"),
+    )
     p.update_ssh_ip()
 
 
@@ -210,21 +213,26 @@ def list_instances(
         log(f"No instances found in '{p.region}'")
         return
 
-    max_name = max(len(i["name"]) for i in instances)
-    max_ip = max(len(i["ip"]) for i in instances)
-    max_region = max(len(i["region"]) for i in instances)
-
-    name_header = "NAME".ljust(max_name)
-    ip_header = "IP ADDRESS".ljust(max_ip)
-    region_header = "REGION".ljust(max_region)
-    print(f"  {name_header}  {ip_header}  {region_header}  STATUS")
-    print(f"  {'-' * max_name}  {'-' * max_ip}  {'-' * max_region}  {'---'}")
-
+    table = Table(
+        box=box.MINIMAL,
+        show_edge=False,
+        pad_edge=False,
+        header_style="bold dim",
+        padding=(1, 1),
+        collapse_padding=True,
+    )
+    table.add_column("NAME", overflow="fold")
+    table.add_column("IP ADDRESS", overflow="fold")
+    table.add_column("REGION", overflow="fold")
+    table.add_column("STATUS")
     for i in instances:
-        name = i["name"].ljust(max_name)
-        ip = i["ip"].ljust(max_ip)
-        region = i["region"].ljust(max_region)
-        print(f"  {name}  {ip}  {region}  {i['status']}")
+        table.add_row(
+            str(i["name"]),
+            str(i["ip"]),
+            str(i["region"]),
+            str(i["status"]),
+        )
+    print(Padding(table, (1, 0, 1, 0)))
 
 
 
@@ -279,8 +287,11 @@ def _ensure_ssh_reachable(ip: str, ssh_user: str, instance: dict) -> None:
         return
     if instance.get("provider") == "aws":
         log("SSH unreachable — updating AWS security group SSH rule to current IP...")
-        from .providers import AWSProvider
-        p = AWSProvider(aws_profile=instance.get("aws_profile"), region=instance.get("region"))
+        p = get_provider(
+            "aws",
+            aws_profile=instance.get("aws_profile"),
+            region=instance.get("region"),
+        )
         p.update_ssh_ip()
         if check_instance_reachable(ip, ssh_user):
             return

@@ -125,7 +125,9 @@ def setup_logging(level: int | str = logging.INFO) -> None:
 
     for name, lvl, propagate in [
         ("boto3", logging.INFO, True),
-        ("botocore", logging.WARNING, True),
+        # ERROR: botocore logs SSO/credential refresh failures at WARNING with
+        # exc_info=True; Rich would print multi-page tracebacks before our message.
+        ("botocore", logging.ERROR, True),
         ("urllib3", logging.WARNING, True),
         ("httpx", logging.WARNING, True),
         ("paramiko", logging.WARNING, True),
