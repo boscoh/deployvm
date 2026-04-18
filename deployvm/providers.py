@@ -24,7 +24,7 @@ from botocore.exceptions import (
 )
 from dotenv import load_dotenv
 
-from .utils import error, log, run_cmd, run_cmd_json, warn
+from .utils import error, log, require_cli, run_cmd, run_cmd_json, warn
 
 ProviderName = Literal["digitalocean", "aws", "vultr"]
 
@@ -142,15 +142,36 @@ class DigitalOceanProvider:
             )
 
     def validate_auth(self) -> None:
-        """Validate DigitalOcean authentication via doctl CLI.
+        """Validate DigitalOcean authentication via doctl CLI (API round-trip).
 
         :raises SystemExit: If authentication validation fails
         """
+        require_cli(
+            "doctl",
+            install_hint="Install doctl, e.g. brew install doctl.",
+        )
         result = subprocess.run(
-            ["doctl", "auth", "validate"], capture_output=True, text=True
+            ["doctl", "account", "get", "-o", "json"],
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
-            error("Not signed in to DigitalOcean. Run: doctl auth init")
+            raw = (result.stderr or result.stdout or "").strip()
+            if raw:
+                try:
+                    payload = json.loads(raw)
+                    errs = payload.get("errors") or []
+                    if errs and isinstance(errs[0], dict):
+                        d = errs[0].get("detail", "")
+                        if isinstance(d, str) and "access token is required" in d.lower():
+                            error("Not signed in to DigitalOcean. Run: doctl auth init")
+                except json.JSONDecodeError:
+                    pass
+            error(
+                "DigitalOcean authentication failed.\n"
+                f"{raw or '(no output)'}\n"
+                "Run: doctl auth init"
+            )
 
     def instance_exists(self, name: str) -> bool:
         """Check if a droplet with the given name exists.
@@ -491,6 +512,7 @@ class AWSProvider:
             )
 
     def validate_auth(self) -> None:
+        """Validate AWS credentials via boto3 (no separate ``aws`` CLI on PATH is required)."""
         check_aws_auth(self.aws_config.get("profile_name"))
         session = self._get_session()
         sts = session.client("sts", region_name=self.region)
@@ -1437,6 +1459,10 @@ class VultrProvider:
 
         :raises SystemExit: If authentication validation fails
         """
+        require_cli(
+            "vultr-cli",
+            install_hint="Install vultr-cli, e.g. brew install vultr-cli.",
+        )
         result = subprocess.run(
             ["vultr-cli", "account", "info"], capture_output=True, text=True
         )

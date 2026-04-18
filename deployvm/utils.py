@@ -2,6 +2,7 @@
 
 import json
 import logging
+import shutil
 import subprocess
 import sys
 
@@ -159,6 +160,12 @@ def error(msg: str) -> None:
     sys.exit(1)
 
 
+def require_cli(name: str, *, install_hint: str) -> None:
+    """Exit if executable ``name`` is not on PATH (avoids FileNotFoundError from subprocess)."""
+    if shutil.which(name) is None:
+        error(f"{name} not found. {install_hint}")
+
+
 def get_ssh_user(provider_name: str) -> str:
     """Get default SSH user for cloud provider.
 
@@ -201,7 +208,10 @@ def run_cmd(*args, check: bool = True) -> str:
     """Execute local command and return stdout."""
     result = subprocess.run(args, capture_output=True, text=True)
     if check and result.returncode != 0:
-        error(f"Command failed: {result.stderr}")
+        err = result.stderr.strip()
+        out = result.stdout.strip()
+        detail = err or out or "(no output)"
+        error(f"Command failed: {detail}")
     return result.stdout.strip()
 
 
