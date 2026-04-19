@@ -1468,7 +1468,8 @@ class VultrProvider:
         )
         if result.returncode != 0:
             error(
-                "Not signed in to Vultr. Install vultr-cli and set the VULTR_API_KEY environment variable."
+                "Vultr authentication failed. Please export VULTR_API_KEY=<..> "
+                "as an environment variable or in .env."
             )
 
     def instance_exists(self, name: str) -> bool:
