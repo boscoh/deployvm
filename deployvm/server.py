@@ -64,27 +64,31 @@ def _parse_nginx_version(text: str) -> tuple[int, int, int] | None:
     return int(m.group(1)), int(m.group(2)), patch
 
 
-def _nginx_newer_than_1_22_line(v: tuple[int, int, int]) -> bool:
+def _nginx_at_least_1_22(v: tuple[int, int, int]) -> bool:
+    """Return True when the version is 1.22+ (or a later major).
+
+    :param v: Parsed (major, minor, patch) version tuple
+    :return: True if the version is supported
+    """
     major, minor, _ = v
-    if major > 1:
-        return True
-    if major < 1:
-        return False
-    return minor > 22
+    if major != 1:
+        return major > 1
+    return minor >= 22
 
 
 def install_nginx(ip: str, ssh_user: str = "deploy") -> None:
-    """Install nginx from apt and ensure it is newer than the entire 1.22.x line (e.g. 1.23+)."""
+    """Install nginx from apt and require version 1.22 or newer."""
     ssh_script(
         ip,
         "sudo apt-get update && sudo apt-get install -y nginx",
         user=ssh_user,
     )
-    ver_line = ssh(ip, "nginx -v 2>&1", user=ssh_user).strip()
+    # /usr/sbin is not on the deploy user's PATH, so run the check via sudo.
+    ver_line = ssh(ip, "sudo nginx -v 2>&1", user=ssh_user).strip()
     parsed = _parse_nginx_version(ver_line)
-    if parsed is None or not _nginx_newer_than_1_22_line(parsed):
+    if parsed is None or not _nginx_at_least_1_22(parsed):
         error(
-            f"nginx must be newer than 1.22.* (parsed from: {ver_line!r}). "
+            f"nginx must be 1.22 or newer (parsed from: {ver_line!r}). "
             "Use a newer OS image or install a current nginx package (e.g. from nginx.org or your distro backports)."
         )
 
