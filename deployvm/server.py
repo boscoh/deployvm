@@ -1,10 +1,12 @@
 """Server operations: SSH, rsync, network validation, and server setup."""
 
 import base64
+import fnmatch
 import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import urllib.error
@@ -103,7 +105,9 @@ def check_instance_auth(instance: dict) -> None:
     get_provider(provider, aws_profile=aws_profile)
 
 
-def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 10) -> bool:
+def check_instance_reachable(
+    ip: str, ssh_user: str = "deploy", timeout: int = 10
+) -> bool:
     """Quick check if instance is reachable via SSH.
 
     :param ip: Instance IP address
@@ -113,7 +117,9 @@ def check_instance_reachable(ip: str, ssh_user: str = "deploy", timeout: int = 1
     """
     try:
         with Connection(
-            ip, user=ssh_user, connect_kwargs={"look_for_keys": True, "timeout": timeout}
+            ip,
+            user=ssh_user,
+            connect_kwargs={"look_for_keys": True, "timeout": timeout},
         ) as c:
             c.run("echo ping", hide=True, in_stream=False)
         return True
@@ -145,9 +151,7 @@ def _format_ssh_command_failure(result, remote_cmd: str) -> str:
         parts.append("--- stdout ---")
         parts.append(format_remote_output_for_message(stdout))
     if not stderr and not stdout:
-        parts.append(
-            "(no stdout/stderr from remote; check shell, sudo, or connection)"
-        )
+        parts.append("(no stdout/stderr from remote; check shell, sudo, or connection)")
     return "\n".join(parts)
 
 
@@ -156,8 +160,14 @@ def _run_ssh(ip: str, cmd: str, user: str, show_output: bool) -> str:
     with Connection(ip, user=user, connect_kwargs={"look_for_keys": True}) as c:
         if show_output:
             stream = LogStream()
-            result = c.run(cmd, hide=True, warn=True, in_stream=False,
-                           out_stream=stream, err_stream=stream)
+            result = c.run(
+                cmd,
+                hide=True,
+                warn=True,
+                in_stream=False,
+                out_stream=stream,
+                err_stream=stream,
+            )
             stream.flush()
         else:
             result = c.run(cmd, hide=True, warn=True, in_stream=False)
@@ -180,16 +190,22 @@ def _retry_ssh(ip: str, cmd: str, user: str, show_output: bool, fail_msg: str) -
                 time.sleep(5)
                 continue
             error(f"SSH connection failed: {e}")
-    error(f"SSH connection failed after retries")  # unreachable but satisfies type checker
+    error(
+        f"SSH connection failed after retries"
+    )  # unreachable but satisfies type checker
 
 
 def ssh(ip: str, cmd: str, user: str = "deploy", show_output: bool = False) -> str:
     return _retry_ssh(ip, cmd, user, show_output, "SSH command failed: ")
 
 
-def ssh_script(ip: str, script: str, user: str = "deploy", show_output: bool = False) -> str:
+def ssh_script(
+    ip: str, script: str, user: str = "deploy", show_output: bool = False
+) -> str:
     escaped = script.replace("'", "'\\''")
-    return _retry_ssh(ip, f"bash -c '{escaped}'", user, show_output, "SSH script failed: ")
+    return _retry_ssh(
+        ip, f"bash -c '{escaped}'", user, show_output, "SSH script failed: "
+    )
 
 
 def ssh_as_user(ip: str, app_user: str, cmd: str, ssh_user: str = "deploy") -> str:
@@ -238,8 +254,25 @@ def rsync(
     if result.returncode == 0:
         return
 
+    # A remote without rsync makes openrsync exit with a truncated stream
+    # ("unexpected end of file"); install it and retry before falling back.
+    if "command not found" in result.stderr or "rsync: not found" in result.stderr:
+        log("Remote host is missing rsync; installing it...")
+        try:
+            ssh_script(
+                ip,
+                "sudo apt-get update -qq && sudo apt-get install -y rsync",
+                user=user,
+            )
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                return
+        except Exception as e:
+            log(f"Could not install rsync on the remote: {e}")
+
     if "Result too large" in result.stderr or "unexpected end of file" in result.stderr:
-        log("rsync failed with large file error, falling back to tar+ssh...")
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else ""
+        log(f"rsync failed ({detail}); falling back to tar+ssh...")
         _rsync_tar_fallback(local, ip, remote, exclude, user)
     else:
         error(f"rsync failed: {result.stderr}")
@@ -267,7 +300,9 @@ def _tar_should_exclude(arcpath: str, exclude: list[str]) -> bool:
             if arcpath == ex or arcpath.startswith(ex + "/"):
                 return True
         else:
-            if basename == ex:
+            if fnmatch.fnmatchcase(basename, ex) or any(
+                fnmatch.fnmatchcase(part, ex) for part in parts[:-1]
+            ):
                 return True
     return False
 
@@ -282,6 +317,7 @@ def _rsync_tar_fallback(
     with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
         tar_path = tmp.name
 
+    archived: set[str] = set()
     try:
         with tarfile.open(tar_path, "w:gz") as tar:
             for dirpath, dirnames, filenames in os.walk(local):
@@ -290,7 +326,8 @@ def _rsync_tar_fallback(
 
                 # Prune excluded directories in-place so os.walk skips them
                 dirnames[:] = [
-                    d for d in dirnames
+                    d
+                    for d in dirnames
                     if not _tar_should_exclude(
                         os.path.join(reldir, d).replace("\\", "/") if reldir else d,
                         exclude,
@@ -305,6 +342,7 @@ def _rsync_tar_fallback(
                     )
                     if not _tar_should_exclude(arcpath, exclude):
                         tar.add(os.path.join(dirpath, filename), arcname=arcpath)
+                        archived.add(arcpath)
     except Exception as e:
         Path(tar_path).unlink(missing_ok=True)
         error(f"tar creation failed: {e}")
@@ -341,8 +379,65 @@ def _rsync_tar_fallback(
         """
         ssh_script(ip, extract_script, user=user)
         log("Transfer complete")
+        _delete_stale_remote_files(ip, remote, exclude, archived, user)
     finally:
         tar_path_obj.unlink(missing_ok=True)
+
+
+def _remote_find_prunes(exclude: list[str]) -> str:
+    """Build `find` predicates that skip excluded directories.
+
+    Keeps the remote listing bounded (e.g. avoids walking .venv) when mirroring
+    rsync --delete after a tar fallback.
+
+    :param exclude: rsync-style exclude patterns
+    :return: A string of `find` predicates (possibly empty)
+    """
+    parts: list[str] = []
+    for ex in exclude or []:
+        name = ex.lstrip("/")
+        if "/" in name or any(ch in name for ch in "*?["):
+            continue
+        if ex.startswith("/"):
+            parts.append(f"! -path './{name}/*'")
+        else:
+            parts.append(f"! -path './{name}/*' ! -path '*/{name}/*'")
+    return " ".join(parts)
+
+
+def _delete_stale_remote_files(
+    ip: str, remote: str, exclude: list[str], archived: set[str], user: str
+) -> None:
+    """Remove remote files absent from the archive, mirroring rsync --delete.
+
+    A tar fallback extracts over the existing tree, so files deleted locally
+    would otherwise linger on the server.
+
+    :param ip: Remote host
+    :param remote: Remote directory that was extracted into
+    :param exclude: rsync-style exclude patterns (never deleted)
+    :param archived: Relative paths that were written
+    :param user: SSH user
+    """
+    prune = _remote_find_prunes(exclude)
+    find_cmd = f"cd {remote} && find . -type f {prune} | sed 's|^\\./||'".strip()
+    try:
+        remote_files = ssh(ip, find_cmd, user=user).splitlines()
+    except Exception as e:
+        log(f"Could not list remote files to prune stale entries: {e}")
+        return
+
+    stale = [
+        f
+        for f in remote_files
+        if f and f not in archived and not _tar_should_exclude(f, exclude)
+    ]
+    if not stale:
+        return
+
+    log(f"Removing {len(stale)} stale file(s) not present in the source...")
+    rm_lines = "\n".join(f"sudo rm -f -- {shlex.quote(f)}" for f in stale)
+    ssh_script(ip, f"set -e\ncd {remote}\n{rm_lines}", user=user)
 
 
 def load_instance(name: str) -> dict:
@@ -390,9 +485,7 @@ def get_instance_apps(instance: dict) -> list[dict]:
     if "apps" in instance:
         return instance["apps"]
     if "app_name" in instance:
-        return [
-            {"name": instance["app_name"], "type": instance.get("app_type", "npm")}
-        ]
+        return [{"name": instance["app_name"], "type": instance.get("app_type", "npm")}]
     return []
 
 
@@ -651,7 +744,9 @@ def verify_http(ip: str, domain: str | None = None, port: int = 80) -> bool:
             pass
         warn(f"Cannot connect to '{url}' ({i + 1}/{HTTP_VERIFY_RETRIES})")
         time.sleep(HTTP_VERIFY_DELAY)
-    error(f"Cannot connect to '{url}' on port {port}. Check UFW: ssh deploy@'{ip}' 'sudo ufw status'")
+    error(
+        f"Cannot connect to '{url}' on port {port}. Check UFW: ssh deploy@'{ip}' 'sudo ufw status'"
+    )
 
 
 def setup_firewall(ip: str, ssh_user: str = "root"):
@@ -737,7 +832,7 @@ def setup_server(
 
         echo "Installing packages..."
         sudo apt-get update
-        sudo apt-get install -y curl wget git ufw
+        sudo apt-get install -y curl wget git ufw rsync
         echo "Done!"
     """).strip()
     log_remote_output(ssh_script(ip, script, user=ssh_user))
@@ -813,7 +908,9 @@ def _verify_instance_ufw(
         issues.append("UFW: 443/tcp is denied/rejected without an allow rule")
 
     if domain is not None and not a443:
-        issues.append("UFW: no allow rule for 443/tcp (required when verifying with --domain)")
+        issues.append(
+            "UFW: no allow rule for 443/tcp (required when verifying with --domain)"
+        )
 
     relaxed_80 = expect_ssl_only_firewall or domain is not None
 
@@ -829,7 +926,9 @@ def _verify_instance_ufw(
             )
 
     if a80 and d80:
-        print("[WARN] Firewall: port 80 has both ALLOW and DENY/REJECT — confirm UFW rule order")
+        print(
+            "[WARN] Firewall: port 80 has both ALLOW and DENY/REJECT — confirm UFW rule order"
+        )
 
     http_to_ip_likely_blocked = bool(a443 and not a80)
 
@@ -838,14 +937,18 @@ def _verify_instance_ufw(
             print("[OK] Firewall: HTTP (80) and HTTPS (443) allowed in UFW")
         elif a443 and not a80 and relaxed_80:
             if d80:
-                print("[OK] Firewall: HTTPS (443) allowed; HTTP (80) denied (SSL-only lockdown)")
+                print(
+                    "[OK] Firewall: HTTPS (443) allowed; HTTP (80) denied (SSL-only lockdown)"
+                )
             else:
                 print(
                     "[OK] Firewall: HTTPS (443) allowed; no allow rule for HTTP (80) "
                     "(SSL-only or implicit deny — fine with --domain or --expect-ssl-only-firewall)"
                 )
         elif a80 and not a443:
-            print("[OK] Firewall: HTTP (80) allowed (no 443 allow — typical for IP-only HTTP)")
+            print(
+                "[OK] Firewall: HTTP (80) allowed (no 443 allow — typical for IP-only HTTP)"
+            )
         elif not a80 and not a443:
             print("[WARN] Firewall: no explicit UFW allow rules for 80 or 443")
         else:
@@ -997,7 +1100,9 @@ def ensure_dns_matches(
         warn(
             f"Update your domain registrar to use these nameservers: {sorted(provider_ns)}"
         )
-        warn("DNS changes via this provider will have no effect until nameservers are updated")
+        warn(
+            "DNS changes via this provider will have no effect until nameservers are updated"
+        )
 
     current_ip = resolve_dns_a(domain) or ""
 
@@ -1122,13 +1227,25 @@ def setup_nginx_ip(
     :param outgoing_port: External port nginx listens on (default: 80)
     :param provider: Cloud provider instance for updating cloud-level firewall rules
     """
-    ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=ssl_only)
-
-    server_block = generate_nginx_server_block(
-        "_", port, static_dir, listen=f"{outgoing_port} default_server", ssl_only=ssl_only
+    ensure_web_firewall(
+        ip,
+        ssh_user=ssh_user,
+        extra_port=outgoing_port,
+        provider=provider,
+        ssl_only=ssl_only,
     )
 
-    log(f"Setting up nginx for IP access on '{ip}' port {outgoing_port} (app: {app_name})...")
+    server_block = generate_nginx_server_block(
+        "_",
+        port,
+        static_dir,
+        listen=f"{outgoing_port} default_server",
+        ssl_only=ssl_only,
+    )
+
+    log(
+        f"Setting up nginx for IP access on '{ip}' port {outgoing_port} (app: {app_name})..."
+    )
     install_nginx(ip, ssh_user)
     ensure_nginx_sites_enabled_included(ip, ssh_user)
     ssh_write_file(
@@ -1173,19 +1290,49 @@ def setup_nginx_ssl(
     """
     defer_ssl_lockdown = False
     if ssl_only:
-        cert_check_cmd = f"test -d /etc/letsencrypt/live/{domain} && echo 'EXISTS' || echo 'MISSING'"
+        cert_check_cmd = (
+            f"test -d /etc/letsencrypt/live/{domain} && echo 'EXISTS' || echo 'MISSING'"
+        )
         cert_exists = ssh(ip, cert_check_cmd, user=ssh_user).strip()
 
-        if cert_exists == 'MISSING':
-            log("🔒 SSL lockdown requested but certificate missing. Using automatic two-phase deployment:")
+        if cert_exists == "MISSING":
+            log(
+                "🔒 SSL lockdown requested but certificate missing. Using automatic two-phase deployment:"
+            )
             log("📋 Phase 1: Setting up SSL certificate with temporary HTTP access...")
 
-            ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=False)
-            _setup_ssl_certificate_phase(ip, domain, email, port, outgoing_port, static_dir, skip_dns, staging, ssh_user, provider_name, aws_profile)
+            ensure_web_firewall(
+                ip,
+                ssh_user=ssh_user,
+                extra_port=outgoing_port,
+                provider=provider,
+                ssl_only=False,
+            )
+            _setup_ssl_certificate_phase(
+                ip,
+                domain,
+                email,
+                port,
+                outgoing_port,
+                static_dir,
+                skip_dns,
+                staging,
+                ssh_user,
+                provider_name,
+                aws_profile,
+            )
 
             log("🔒 Phase 2: Applying SSL lockdown (blocking HTTP access)...")
-            ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=True)
-            _apply_ssl_lockdown_phase(ip, domain, port, static_dir, outgoing_port, ssh_user)
+            ensure_web_firewall(
+                ip,
+                ssh_user=ssh_user,
+                extra_port=outgoing_port,
+                provider=provider,
+                ssl_only=True,
+            )
+            _apply_ssl_lockdown_phase(
+                ip, domain, port, static_dir, outgoing_port, ssh_user
+            )
 
             log("✅ SSL lockdown deployment complete! HTTPS-only access enabled.")
             return
@@ -1204,7 +1351,9 @@ def setup_nginx_ssl(
         ssl_only=False if defer_ssl_lockdown else ssl_only,
     )
     if not skip_dns:
-        ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
+        ensure_dns_matches(
+            domain, ip, provider_name=provider_name, aws_profile=aws_profile
+        )
 
     # Remove default site so it doesn't conflict with domain-based config
     ssh_script(
@@ -1240,7 +1389,9 @@ def setup_nginx_ssl(
     auth_ns_ip = resolve_authoritative_ns_ip(domain)
     for i in range(DNS_VERIFY_RETRIES):
         # Check authoritative NS first (instant for Route53), then public resolver
-        resolved = (auth_ns_ip and resolve_dns_a(domain, auth_ns_ip)) or resolve_dns_a(domain)
+        resolved = (auth_ns_ip and resolve_dns_a(domain, auth_ns_ip)) or resolve_dns_a(
+            domain
+        )
         if resolved == ip:
             log(f"DNS verified: '{domain}' -> '{ip}'")
             break
@@ -1272,7 +1423,13 @@ def setup_nginx_ssl(
     ssh_script(ip, ssl_script, user=ssh_user)
 
     if defer_ssl_lockdown:
-        ensure_web_firewall(ip, ssh_user=ssh_user, extra_port=outgoing_port, provider=provider, ssl_only=True)
+        ensure_web_firewall(
+            ip,
+            ssh_user=ssh_user,
+            extra_port=outgoing_port,
+            provider=provider,
+            ssl_only=True,
+        )
         _apply_ssl_lockdown_phase(ip, domain, port, static_dir, outgoing_port, ssh_user)
         port_suffix = f":{outgoing_port}" if outgoing_port != 443 else ""
         log(f"SSL configured! http://{ip} and https://{domain}{port_suffix}")
@@ -1297,10 +1454,12 @@ def setup_nginx_ssl(
     ssh_script(
         ip,
         "for f in $(grep -rl 'server_name _' /etc/nginx/sites-enabled/ 2>/dev/null);"
-        " do sudo rm -f \"$f\"; done",
+        ' do sudo rm -f "$f"; done',
         user=ssh_user,
     )
-    ip_block = generate_nginx_server_block("_", port, static_dir, listen="80", ssl_only=ssl_only)
+    ip_block = generate_nginx_server_block(
+        "_", port, static_dir, listen="80", ssl_only=ssl_only
+    )
     ssh_write_file(ip, "/etc/nginx/sites-available/ip-access", ip_block, user=ssh_user)
     ssh_script(
         ip,
@@ -1373,16 +1532,24 @@ def probe_domain(ip: str, domain: str, port: int = 443) -> None:
 
         not_after_str = cert.get("notAfter", "")
         if not_after_str:
-            not_after = datetime.strptime(not_after_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            not_after = datetime.strptime(
+                not_after_str, "%b %d %H:%M:%S %Y %Z"
+            ).replace(tzinfo=timezone.utc)
             days_remaining = (not_after - datetime.now(timezone.utc)).days
             expiry_date = not_after.strftime("%Y-%m-%d")
             if days_remaining > 14:
-                print(f"[OK] SSL cert: valid, expires in {days_remaining} days ({expiry_date})")
+                print(
+                    f"[OK] SSL cert: valid, expires in {days_remaining} days ({expiry_date})"
+                )
             elif days_remaining > 0:
-                print(f"[WARN] SSL cert: expires soon in {days_remaining} days ({expiry_date})")
+                print(
+                    f"[WARN] SSL cert: expires soon in {days_remaining} days ({expiry_date})"
+                )
                 issues.append(f"SSL certificate expires in {days_remaining} days")
             else:
-                print(f"[FAIL] SSL cert: expired {-days_remaining} days ago ({expiry_date})")
+                print(
+                    f"[FAIL] SSL cert: expired {-days_remaining} days ago ({expiry_date})"
+                )
                 issues.append("SSL certificate expired")
 
         san_list = [v for t, v in cert.get("subjectAltName", []) if t == "DNS"]
@@ -1480,7 +1647,9 @@ def verify_instance(
         print("[OK] HTTP: responding")
     elif relax_http_ip:
         if status_code:
-            print(f"[WARN] HTTP: instance IP returned '{response_line}' (HTTPS-only / blocked 80 is common)")
+            print(
+                f"[WARN] HTTP: instance IP returned '{response_line}' (HTTPS-only / blocked 80 is common)"
+            )
         else:
             print(
                 "[WARN] HTTP: no response on instance IP (expected when only 443 is open or "
@@ -1525,12 +1694,14 @@ def _setup_ssl_certificate_phase(
     aws_profile: str | None,
 ):
     """Phase 1 of SSL lockdown: Setup SSL certificate with HTTP access allowed.
-    
+
     This is extracted from the main setup_nginx_ssl function to handle
     the two-phase deployment for SSL lockdown mode.
     """
     if not skip_dns:
-        ensure_dns_matches(domain, ip, provider_name=provider_name, aws_profile=aws_profile)
+        ensure_dns_matches(
+            domain, ip, provider_name=provider_name, aws_profile=aws_profile
+        )
 
     # Remove default site so it doesn't conflict with domain-based config
     ssh_script(
@@ -1560,7 +1731,9 @@ def _setup_ssl_certificate_phase(
     log("Verifying DNS...")
     auth_ns_ip = resolve_authoritative_ns_ip(domain)
     for i in range(DNS_VERIFY_RETRIES):
-        resolved = (auth_ns_ip and resolve_dns_a(domain, auth_ns_ip)) or resolve_dns_a(domain)
+        resolved = (auth_ns_ip and resolve_dns_a(domain, auth_ns_ip)) or resolve_dns_a(
+            domain
+        )
         if resolved == ip:
             log(f"DNS verified: '{domain}' -> '{ip}'")
             break
@@ -1613,12 +1786,12 @@ def _apply_ssl_lockdown_phase(
     ssh_user: str,
 ):
     """Phase 2 of SSL lockdown: Apply HTTP blocking to existing SSL setup.
-    
+
     This regenerates the nginx configuration with SSL-only blocking
     and removes any HTTP access created by certbot.
     """
     log("Regenerating nginx configuration with SSL lockdown...")
-    
+
     # Generate SSL-only server block (with HTTP blocking)
     server_block = generate_nginx_server_block(
         f"{domain} www.{domain}",
@@ -1628,13 +1801,13 @@ def _apply_ssl_lockdown_phase(
         listen="443 ssl",
         letsencrypt_cert_name=domain,
     )
-    
+
     # Write the new SSL-only configuration
     ssh_write_file(
         ip, f"/etc/nginx/sites-available/{domain}", server_block, user=ssh_user
     )
-    
-    # Handle custom SSL ports in SSL-only mode  
+
+    # Handle custom SSL ports in SSL-only mode
     if outgoing_port != 443:
         log(f"Adding custom SSL port {outgoing_port} to SSL-only configuration...")
         add_listen_script = dedent(f"""
@@ -1645,23 +1818,25 @@ def _apply_ssl_lockdown_phase(
             sudo nginx -t && sudo systemctl reload nginx
         """).strip()
         ssh_script(ip, add_listen_script, user=ssh_user)
-    
+
     # Reload nginx with SSL-only configuration
     ssh_script(
         ip,
         f"sudo nginx -t && sudo systemctl reload nginx",
         user=ssh_user,
     )
-    
+
     # Setup IP access fallback with SSL-only blocking
     log("Configuring IP access fallback with SSL lockdown...")
     ssh_script(
         ip,
         "for f in $(grep -rl 'server_name _' /etc/nginx/sites-enabled/ 2>/dev/null);"
-        " do sudo rm -f \"$f\"; done",
+        ' do sudo rm -f "$f"; done',
         user=ssh_user,
     )
-    ip_block = generate_nginx_server_block("_", port, static_dir, listen="80", ssl_only=True)
+    ip_block = generate_nginx_server_block(
+        "_", port, static_dir, listen="80", ssl_only=True
+    )
     ssh_write_file(ip, "/etc/nginx/sites-available/ip-access", ip_block, user=ssh_user)
     ssh_script(
         ip,
@@ -1669,5 +1844,5 @@ def _apply_ssl_lockdown_phase(
         " && sudo nginx -t && sudo systemctl reload nginx",
         user=ssh_user,
     )
-    
+
     log("SSL lockdown applied successfully - HTTP access blocked at nginx level")
