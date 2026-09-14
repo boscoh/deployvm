@@ -28,6 +28,9 @@ from .utils import error, log, require_cli, run_cmd, run_cmd_json, warn
 
 ProviderName = Literal["digitalocean", "aws", "vultr"]
 
+# Managed policy attached to the deploy-vm-bedrock role so instances can call Bedrock.
+BEDROCK_POLICY_ARN = "arn:aws:iam::aws:policy/AmazonBedrockFullAccess"
+
 
 def get_local_ssh_key() -> tuple[str, str]:
     """:return: (key_content, md5_fingerprint)"""
@@ -943,9 +946,10 @@ class AWSProvider:
     def _ensure_iam_role_and_profile(self, role_name: str) -> str:
         """Ensure IAM role and instance profile exist.
 
-        Creates or retrieves an IAM role with EC2 trust policy, creates an instance 
-        profile with the same name, and associates the role with the profile. Waits 
-        for the profile to be fully propagated before returning.
+        Creates or retrieves an IAM role with EC2 trust policy, attaches the
+        AmazonBedrockFullAccess managed policy, creates an instance profile with
+        the same name, and associates the role with the profile. Waits for the
+        profile to be fully propagated before returning.
 
         :param role_name: Name for both the IAM role and instance profile
         :return: Instance profile name (same as role_name)
@@ -1003,7 +1007,23 @@ class AWSProvider:
                 else:
                     raise
 
-        # Skip Bedrock policy attachment to avoid permission issues
+        # The role exists to grant Bedrock access, so attach the managed policy.
+        # Attaching is idempotent; if the caller lacks iam:AttachRolePolicy, warn
+        # instead of failing so the instance can still be created and fixed up
+        # manually.
+        try:
+            iam.attach_role_policy(RoleName=role_name, PolicyArn=BEDROCK_POLICY_ARN)
+            log(f"Attached '{BEDROCK_POLICY_ARN}' to role '{role_name}'")
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("AccessDenied", "AccessDeniedException"):
+                warn(
+                    f"Role '{role_name}' has no Bedrock permissions (missing "
+                    f"iam:AttachRolePolicy). Attach it manually:\n"
+                    f"  aws iam attach-role-policy --role-name {role_name} "
+                    f"--policy-arn {BEDROCK_POLICY_ARN}"
+                )
+            else:
+                raise
 
         profile_name = role_name
         try:
@@ -1080,6 +1100,34 @@ class AWSProvider:
             "ip": instance.get("PublicIpAddress", "N/A"),
         }
 
+    def _run_instances(self, ec2, run_params: dict):
+        """Launch an instance, retrying while a new IAM profile propagates.
+
+        RunInstances can reject a freshly created instance profile with
+        InvalidParameterValue ("Invalid IAM Instance Profile name") because the
+        profile has not yet reached the EC2 control plane.
+
+        :param ec2: Boto3 EC2 client
+        :param run_params: Keyword arguments for run_instances
+        :return: The run_instances response
+        """
+        for attempt in range(6):
+            try:
+                return ec2.run_instances(**run_params)
+            except ClientError as e:
+                profile_not_visible = (
+                    "IamInstanceProfile" in run_params
+                    and e.response["Error"]["Code"] == "InvalidParameterValue"
+                    and "nstance Profile" in e.response["Error"].get("Message", "")
+                )
+                if not profile_not_visible or attempt == 5:
+                    raise
+                log(
+                    "IAM instance profile not yet visible to EC2; retrying "
+                    f"({attempt + 1}/6)..."
+                )
+                time.sleep(5)
+
     def create_instance(
         self,
         name: str,
@@ -1147,7 +1195,7 @@ class AWSProvider:
             run_params["IamInstanceProfile"] = {"Name": instance_profile_name}
             log(f"Attaching IAM instance profile: '{instance_profile_name}'")
 
-        response = ec2.run_instances(**run_params)
+        response = self._run_instances(ec2, run_params)
 
         instance_id = response["Instances"][0]["InstanceId"]
         log("Waiting for instance to start...")
