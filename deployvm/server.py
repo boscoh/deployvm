@@ -240,7 +240,8 @@ def rsync(
         "-avz",
         "--delete",
         "--partial",
-        "--inplace",
+        # No --inplace: a read-only destination file cannot be opened for
+        # writing, so rsync writes a temp file and renames it instead.
         "--no-whole-file",
         "--block-size=8192",
         "-e",
