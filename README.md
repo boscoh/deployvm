@@ -281,6 +281,11 @@ creates the DNS zone and A records, prints nameservers, waits for propagation, i
 **`npm sync` options:**
 - `--exclude <pattern>` (repeatable) keeps extra paths off the server and out of the source hash. `npm sync` always excludes `node_modules`, `.git`, the build output directory, `public/projects`, `data/scripts/models`, `json/projects`, and project junk (`.beads`, `.pi`, `.claude`, `.idea`, `.DS_Store`, `*.gate.lock*`).
 - Transfers write each changed file to a temporary name and then rename it, so a read-only file on the server cannot fail the next deploy. An interrupted transfer keeps the partial data for the next run (`--partial`).
+- `--staging` uploads into a sibling `<app-dir>.staging` directory and swaps it into place only after the transfer, and after the on-server build when `--no-local-build` is set. The transfer keeps its server-side copies of `node_modules`, `public/projects`, `data/scripts/models`, and `json/projects`, so the promote carries the live copies into the promoted directory; when the staging directory already holds one of those paths, the fresh build wins and the live copy stays in `<app-dir>.previous`. A path added with `--exclude` is **not** carried: today's transfer protects it with `--delete`, but a staged promote leaves it behind and the next promote removes it with `rm -rf <app-dir>.previous`. The directory the promote replaces is kept as `<app-dir>.previous`, so a rollback is one `mv` away. During a staged deploy the parent directory holds the live app, `<app-dir>.staging`, and `<app-dir>.previous`, so up to three copies of the app exist on disk. A staged deploy is **not concurrent-safe: run one deploy at a time**. This is off by default, and **the swap is not verified on a real instance yet**; making it the default belongs with `nimago-a7w.6`.
+
+**`npm deploy` options:**
+- `--exclude <pattern>` (repeatable) is forwarded to `npm sync`, so a deploy-only run keeps extra paths off the server and out of the source hash. The same built-ins as `npm sync` always apply.
+- `--staging` is offered on `npm sync` only, so a deploy followed by `npm sync --staging` is the staged path.
 
 ## Requirements
 
