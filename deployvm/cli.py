@@ -571,6 +571,7 @@ def deploy_npm(
     start_script: str = ".output/server/index.mjs",
     build_command: str = "npm run build",
     dist_dir: str = ".output",
+    exclude: list[str] | None = None,
     static_subdir: str | None = None,
     ssl_only: bool = False,
 ):
@@ -598,6 +599,7 @@ def deploy_npm(
     :param start_script: Script or file PM2 runs, or "npm run <cmd>" (default: .output/server/index.mjs)
     :param build_command: Build command to run (default: npm run build)
     :param dist_dir: Build output directory excluded from upload (default: .output)
+    :param exclude: Extra path patterns to exclude from upload and source hash (repeatable)
     :param static_subdir: Path within app dir for nginx to serve static files directly.
         Defaults to {dist_dir}/public (Nuxt). Use {dist_dir}/client for SvelteKit/Remix,
         or {dist_dir} for a plain Vite app. Pass empty string to disable static serving.
@@ -657,6 +659,7 @@ def deploy_npm(
         start_script=start_script,
         build_command=build_command,
         dist_dir=dist_dir,
+        exclude=exclude,
     )
 
     aws_profile = data.get("aws_profile") if data.get("provider") == "aws" else None
