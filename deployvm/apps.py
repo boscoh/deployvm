@@ -1,5 +1,6 @@
 """App deployment logic for Nuxt and uv Python applications."""
 
+import fnmatch
 import hashlib
 import json
 import re
@@ -104,6 +105,71 @@ def filter_aws_credentials_from_env(
     return True  # Signal that .env should be excluded from main rsync
 
 
+def _matches_glob(relative: str, pattern: str, basename: str) -> bool:
+    """Match one glob the way rsync matches it.
+
+    A pattern with no `/` matches the basename at any depth. A pattern with
+    one is anchored at the source root and matched segment by segment, so
+    `*` does not cross a `/`; a trailing `/**` matches everything under the
+    prefix. Matching is case-sensitive, as rsync's is.
+    """
+    if "/" not in pattern:
+        return fnmatch.fnmatchcase(basename, pattern)
+    if pattern.endswith("/**"):
+        return relative.startswith(f"{pattern[:-3]}/")
+    pattern_parts = pattern.split("/")
+    path_parts = relative.split("/")
+    return len(pattern_parts) == len(path_parts) and all(
+        fnmatch.fnmatchcase(path_part, pattern_part)
+        for path_part, pattern_part in zip(path_parts, pattern_parts)
+    )
+
+
+def _is_excluded_path(path: Path, source_path: Path, exclude: list[str]) -> bool:
+    """Return True if path matches an rsync-style exclude pattern.
+
+    The matcher mirrors rsync, because the hash it feeds is compared against
+    the hash the transfer left behind: a pattern that excludes on one side
+    only either ships a file without a redeploy or redeploys without
+    shipping. A pattern with a `/` is anchored at the source root, as rsync
+    anchors it, whether or not it is a glob. A pattern without one matches a
+    whole path component, so `.pi` excludes a `.pi` directory and not
+    `transform.pipe.ts`. A pattern with `*?[` is a glob for
+    `_matches_glob`.
+
+    :param path: File path to test
+    :param source_path: Root the relative path is measured from
+    :param exclude: List of rsync-style exclude patterns
+    :return: True if the path should be excluded
+    """
+    relative = path.relative_to(source_path).as_posix()
+    for pattern in exclude:
+        if not pattern:
+            continue
+        anchored = pattern.lstrip("/")
+        if any(char in pattern for char in "*?["):
+            if _matches_glob(relative, anchored, path.name):
+                return True
+        elif "/" in pattern:
+            anchored = anchored.rstrip("/")
+            if relative == anchored or relative.startswith(f"{anchored}/"):
+                return True
+        elif pattern in relative.split("/"):
+            return True
+    return False
+
+
+# Project junk that never reaches the server and never contributes to the hash.
+NPM_JUNK_EXCLUDES = [
+    ".beads",
+    ".pi",
+    ".claude",
+    ".idea",
+    ".DS_Store",
+    "*.gate.lock*",
+]
+
+
 class BaseApp:
     """Base class for app deployment."""
 
@@ -129,7 +195,7 @@ class BaseApp:
 
         hasher = hashlib.md5()
         for f in sorted(source_path.rglob("*")):
-            if f.is_file() and not any(ex in str(f) for ex in exclude):
+            if f.is_file() and not _is_excluded_path(f, source_path, exclude):
                 hasher.update(str(f.relative_to(source_path)).encode())
                 hasher.update(f.read_bytes())
         return hasher.hexdigest()
@@ -301,12 +367,15 @@ class NpmApp(BaseApp):
         *,
         local_build: bool = True,
         force: bool = False,
+        exclude: list[str] | None = None,
     ):
         """Sync npm app to server.
 
         :param source: Local source directory
         :param local_build: Build locally instead of on server
         :param force: Force rebuild even if source unchanged
+        :param exclude: Extra paths to exclude from the source hash and the
+            rsync transfer (rsync-style patterns, repeatable)
         """
         source = str(Path(source).resolve())
 
@@ -350,6 +419,7 @@ class NpmApp(BaseApp):
             user=self.ssh_user,
         )
 
+        extra_exclude = list(exclude or [])
         npm_exclude = [
             "node_modules",
             ".git",
@@ -357,6 +427,8 @@ class NpmApp(BaseApp):
             "public/projects",
             "data/scripts/models",
             "json/projects",
+            *NPM_JUNK_EXCLUDES,
+            *extra_exclude,
         ]
         local_hash = self.compute_source_hash(source, npm_exclude)
         try:
@@ -392,18 +464,20 @@ class NpmApp(BaseApp):
             self._fix_absolute_imports(source)
 
         log("Uploading...")
-        exclude = [
-            "/node_modules",
+        rsync_exclude = [
+            "node_modules",
             ".git",
             "ecosystem.config.cjs",
             ".source_hash",
             "public/projects",
             "data/scripts/models",
             "json/projects",
+            *NPM_JUNK_EXCLUDES,
+            *extra_exclude,
         ]
         if not local_build:
-            exclude.append(self.dist_dir)
-        rsync(source, self.ip, self.app_dir, exclude=exclude, user=self.ssh_user)
+            rsync_exclude.append(self.dist_dir)
+        rsync(source, self.ip, self.app_dir, exclude=rsync_exclude, user=self.ssh_user)
 
         if not local_build:
             log("Building on server...")

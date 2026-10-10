@@ -416,6 +416,7 @@ def sync_npm(
     start_script: str = ".output/server/index.mjs",
     build_command: str = "npm run build",
     dist_dir: str = ".output",
+    exclude: list[str] | None = None,
 ):
     """Sync npm app to existing server.
 
@@ -431,6 +432,7 @@ def sync_npm(
     :param start_script: Script or file PM2 runs (default: .output/server/index.mjs)
     :param build_command: Build command to run (default: npm run build)
     :param dist_dir: Build output directory excluded from upload (default: .output)
+    :param exclude: Extra path patterns to exclude from upload and source hash (repeatable)
     """
     # Check if instance file exists (unless target is an IP address)
     if not is_valid_ip(target):
@@ -465,7 +467,7 @@ def sync_npm(
         build_command=build_command,
         dist_dir=dist_dir,
     )
-    npm_inst.sync(source, local_build=local_build, force=force)
+    npm_inst.sync(source, local_build=local_build, force=force, exclude=exclude)
 
 
 @npm_app.command(name="restart")

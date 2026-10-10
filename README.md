@@ -278,6 +278,10 @@ creates the DNS zone and A records, prints nameservers, waits for propagation, i
 - `--iam-role <name>` (AWS only)
 - `--ssl-only` (block port 80 at firewall level for enhanced security)
 
+**`npm sync` options:**
+- `--exclude <pattern>` (repeatable) keeps extra paths off the server and out of the source hash. `npm sync` always excludes `node_modules`, `.git`, the build output directory, `public/projects`, `data/scripts/models`, `json/projects`, and project junk (`.beads`, `.pi`, `.claude`, `.idea`, `.DS_Store`, `*.gate.lock*`).
+- Transfers write each changed file to a temporary name and then rename it, so a read-only file on the server cannot fail the next deploy. An interrupted transfer keeps the partial data for the next run (`--partial`).
+
 ## Requirements
 
 | Tool                         | Purpose                    | Required | Install                     |
