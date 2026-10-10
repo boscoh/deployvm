@@ -170,6 +170,17 @@ NPM_JUNK_EXCLUDES = [
 ]
 
 
+# Paths the transfer excludes, so the server keeps its own copy: a local-json
+# project's data, and the node_modules a start script may need. They live in the
+# live app directory, so a staged promote moves them into the promoted one.
+NPM_LIVE_PATHS = [
+    "node_modules",
+    "public/projects",
+    "data/scripts/models",
+    "json/projects",
+]
+
+
 class BaseApp:
     """Base class for app deployment."""
 
@@ -368,6 +379,7 @@ class NpmApp(BaseApp):
         local_build: bool = True,
         force: bool = False,
         exclude: list[str] | None = None,
+        staging: bool = False,
     ):
         """Sync npm app to server.
 
@@ -376,6 +388,14 @@ class NpmApp(BaseApp):
         :param force: Force rebuild even if source unchanged
         :param exclude: Extra paths to exclude from the source hash and the
             rsync transfer (rsync-style patterns, repeatable)
+        :param staging: Transfer into a sibling ``{app_dir}.staging`` directory
+            and swap it into place after the transfer, instead of writing into
+            the live app directory. Off by default. The swap is not verified on
+            a real instance yet; making it the default belongs with nimago-a7w.6.
+            A staged deploy is not concurrent-safe: run one deploy at a time.
+            Only the built-in excluded paths are carried into the promoted
+            directory; a path from ``exclude`` is not, so it leaves with the
+            replaced directory and the next promote removes it.
         """
         source = str(Path(source).resolve())
 
@@ -421,12 +441,9 @@ class NpmApp(BaseApp):
 
         extra_exclude = list(exclude or [])
         npm_exclude = [
-            "node_modules",
+            *NPM_LIVE_PATHS,
             ".git",
             self.dist_dir,
-            "public/projects",
-            "data/scripts/models",
-            "json/projects",
             *NPM_JUNK_EXCLUDES,
             *extra_exclude,
         ]
@@ -463,31 +480,81 @@ class NpmApp(BaseApp):
 
             self._fix_absolute_imports(source)
 
+        remote_dir = f"{self.app_dir}.staging" if staging else self.app_dir
+        live_paths = " ".join(NPM_LIVE_PATHS)
+        if staging:
+            log("Preparing staging directory...")
+            # A stale staging directory must not promote an old copy of a live
+            # path as if the transfer produced it.
+            staging_script = dedent(f"""
+                set -e
+                sudo mkdir -p {remote_dir}
+                sudo chown -R {self.user}:{self.user} {remote_dir}
+                for path in {live_paths}; do
+                    sudo rm -rf "{remote_dir}/$path"
+                done
+            """).strip()
+            ssh_script(self.ip, staging_script, user=self.ssh_user)
+
         log("Uploading...")
         rsync_exclude = [
-            "node_modules",
+            *NPM_LIVE_PATHS,
             ".git",
             "ecosystem.config.cjs",
             ".source_hash",
-            "public/projects",
-            "data/scripts/models",
-            "json/projects",
             *NPM_JUNK_EXCLUDES,
             *extra_exclude,
         ]
         if not local_build:
             rsync_exclude.append(self.dist_dir)
-        rsync(source, self.ip, self.app_dir, exclude=rsync_exclude, user=self.ssh_user)
+
+        rsync(source, self.ip, remote_dir, exclude=rsync_exclude, user=self.ssh_user)
 
         if not local_build:
             log("Building on server...")
             build_script = dedent(f"""
                 set -e
-                cd {self.app_dir}
+                cd {remote_dir}
                 export NODE_OPTIONS="--max-old-space-size=1024"
-                su - {self.user} -c "cd {self.app_dir} && rm -rf package-lock.json && npm install && {self.build_command}"
+                su - {self.user} -c "cd {remote_dir} && rm -rf package-lock.json && npm install && {self.build_command}"
             """).strip()
             ssh_script(self.ip, build_script, user=self.ssh_user, show_output=True)
+
+        if staging:
+            log("Promoting staged app...")
+            # The promoted directory keeps the one it replaces next to it, so a
+            # rollback is one directory move away. The transfer excludes
+            # ecosystem.config.cjs and the live paths, so the promote copies the
+            # config and moves the live paths into the staging directory first.
+            promote_script = dedent(f"""
+                set -e
+                if [ -f {self.app_dir}/ecosystem.config.cjs ]; then
+                    sudo cp {self.app_dir}/ecosystem.config.cjs {remote_dir}/ecosystem.config.cjs
+                fi
+                for path in {live_paths}; do
+                    if [ -e {self.app_dir}/$path ] && [ ! -e {remote_dir}/$path ]; then
+                        sudo mkdir -p {remote_dir}/$(dirname "$path")
+                        sudo mv {self.app_dir}/$path {remote_dir}/$path
+                    fi
+                done
+                sudo rm -rf {self.app_dir}.previous
+                if [ -d {self.app_dir} ]; then
+                    sudo mv {self.app_dir} {self.app_dir}.previous
+                fi
+                if ! sudo mv {remote_dir} {self.app_dir}; then
+                    if [ ! -e {self.app_dir} ] && [ -d {self.app_dir}.previous ]; then
+                        sudo mv {self.app_dir}.previous {self.app_dir}
+                        for path in {live_paths}; do
+                            if [ -e {remote_dir}/$path ] && [ ! -e {self.app_dir}/$path ]; then
+                                sudo mkdir -p {self.app_dir}/$(dirname "$path")
+                                sudo mv {remote_dir}/$path {self.app_dir}/$path
+                            fi
+                        done
+                    fi
+                    exit 1
+                fi
+            """).strip()
+            ssh_script(self.ip, promote_script, user=self.ssh_user)
 
         log("Starting app...")
         start_script = dedent(f"""

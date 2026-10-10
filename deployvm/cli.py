@@ -417,6 +417,7 @@ def sync_npm(
     build_command: str = "npm run build",
     dist_dir: str = ".output",
     exclude: list[str] | None = None,
+    staging: bool = False,
 ):
     """Sync npm app to existing server.
 
@@ -433,6 +434,13 @@ def sync_npm(
     :param build_command: Build command to run (default: npm run build)
     :param dist_dir: Build output directory excluded from upload (default: .output)
     :param exclude: Extra path patterns to exclude from upload and source hash (repeatable)
+    :param staging: Transfer into a sibling staging directory (the app directory
+        path with a .staging suffix) and swap it into place after the transfer,
+        instead of writing into the live app directory. Off by default. The swap
+        is not verified on a real instance yet; making it the default belongs
+        with nimago-a7w.6. A staged deploy is not concurrent-safe: run one
+        deploy at a time. Only the built-in excluded paths are carried into the
+        promoted directory; a path from --exclude is not.
     """
     # Check if instance file exists (unless target is an IP address)
     if not is_valid_ip(target):
@@ -467,7 +475,9 @@ def sync_npm(
         build_command=build_command,
         dist_dir=dist_dir,
     )
-    npm_inst.sync(source, local_build=local_build, force=force, exclude=exclude)
+    npm_inst.sync(
+        source, local_build=local_build, force=force, exclude=exclude, staging=staging
+    )
 
 
 @npm_app.command(name="restart")
